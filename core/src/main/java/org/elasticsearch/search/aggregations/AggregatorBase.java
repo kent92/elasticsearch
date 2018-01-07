@@ -18,12 +18,10 @@
  */
 package org.elasticsearch.search.aggregations;
 
-import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.apache.lucene.index.LeafReaderContext;
+import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
-import org.elasticsearch.search.aggregations.bucket.BestBucketsDeferringCollector;
-import org.elasticsearch.search.aggregations.bucket.DeferringBucketCollector;
 import org.elasticsearch.search.aggregations.pipeline.PipelineAggregator;
 import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.search.internal.SearchContext.Lifetime;
@@ -31,6 +29,7 @@ import org.elasticsearch.search.query.QueryPhaseExecutionException;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,7 +51,6 @@ public abstract class AggregatorBase extends Aggregator {
     protected BucketCollector collectableSubAggregators;
 
     private Map<String, Aggregator> subAggregatorbyName;
-    private DeferringBucketCollector recordingWrapper;
     private final List<PipelineAggregator> pipelineAggregators;
     private final CircuitBreakerService breakerService;
     private long requestBytesUsed;
@@ -107,7 +105,7 @@ public abstract class AggregatorBase extends Aggregator {
         };
         addRequestCircuitBreakerBytes(DEFAULT_WEIGHT);
     }
-    
+
     /**
      * Increment or decrement the number of bytes that have been allocated to service
      * this request and potentially trigger a {@link CircuitBreakingException}. The
@@ -116,7 +114,7 @@ public abstract class AggregatorBase extends Aggregator {
      * If memory has been returned, decrement it without tripping the breaker.
      * For performance reasons subclasses should not call this millions of times
      * each with small increments and instead batch up into larger allocations.
-     * 
+     *
      * @param bytes the number of bytes to register or negative to deregister the bytes
      * @return the cumulative size in bytes allocated by this aggregator to service this request
      */
@@ -164,8 +162,16 @@ public abstract class AggregatorBase extends Aggregator {
 
     @Override
     public final LeafBucketCollector getLeafCollector(LeafReaderContext ctx) throws IOException {
+        preGetSubLeafCollectors();
         final LeafBucketCollector sub = collectableSubAggregators.getLeafCollector(ctx);
         return getLeafCollector(ctx, sub);
+    }
+
+    /**
+     * Can be overridden by aggregator implementations that like the perform an operation before the leaf collectors
+     * of children aggregators are instantiated for the next segment.
+     */
+    protected void preGetSubLeafCollectors() throws IOException {
     }
 
     /**
@@ -176,54 +182,10 @@ public abstract class AggregatorBase extends Aggregator {
 
     @Override
     public final void preCollection() throws IOException {
-        List<BucketCollector> collectors = new ArrayList<>();
-        List<BucketCollector> deferredCollectors = new ArrayList<>();
-        for (int i = 0; i < subAggregators.length; ++i) {
-            if (shouldDefer(subAggregators[i])) {
-                if (recordingWrapper == null) {
-                    recordingWrapper = getDeferringCollector();
-                }
-                deferredCollectors.add(subAggregators[i]);
-                subAggregators[i] = recordingWrapper.wrap(subAggregators[i]);
-            } else {
-                collectors.add(subAggregators[i]);
-            }
-        }
-        if (recordingWrapper != null) {
-            recordingWrapper.setDeferredCollector(deferredCollectors);
-            collectors.add(recordingWrapper);
-        }
+        List<BucketCollector> collectors = Arrays.asList(subAggregators);
         collectableSubAggregators = BucketCollector.wrap(collectors);
         doPreCollection();
         collectableSubAggregators.preCollection();
-    }
-
-    public DeferringBucketCollector getDeferringCollector() {
-        // Default impl is a collector that selects the best buckets
-        // but an alternative defer policy may be based on best docs.
-        return new BestBucketsDeferringCollector(context());
-    }
-
-    /**
-     * This method should be overridden by subclasses that want to defer calculation
-     * of a child aggregation until a first pass is complete and a set of buckets has
-     * been pruned.
-     * Deferring collection will require the recording of all doc/bucketIds from the first
-     * pass and then the sub class should call {@link #runDeferredCollections(long...)}
-     * for the selected set of buckets that survive the pruning.
-     * @param aggregator the child aggregator
-     * @return true if the aggregator should be deferred
-     * until a first pass at collection has completed
-     */
-    protected boolean shouldDefer(Aggregator aggregator) {
-        return false;
-    }
-
-    protected final void runDeferredCollections(long... bucketOrds) throws IOException{
-        // Being lenient here - ignore calls where there are no deferred collections to playback
-        if (recordingWrapper != null) {
-            recordingWrapper.replay(bucketOrds);
-        }
     }
 
     /**

@@ -64,7 +64,7 @@ public class LongRandomBinaryDocValuesRangeQueryTests extends BaseRandomBinaryDo
         }
     }
 
-    private static class LongTestRange extends AbstractRange {
+    private static class LongTestRange extends AbstractRange<Long> {
         long min;
         long max;
 
@@ -74,7 +74,7 @@ public class LongRandomBinaryDocValuesRangeQueryTests extends BaseRandomBinaryDo
         }
 
         @Override
-        public Object getMin() {
+        public Long getMin() {
             return min;
         }
 
@@ -90,7 +90,7 @@ public class LongRandomBinaryDocValuesRangeQueryTests extends BaseRandomBinaryDo
         }
 
         @Override
-        public Object getMax() {
+        public Long getMax() {
             return max;
         }
 

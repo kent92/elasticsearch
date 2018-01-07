@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.lucene.util.IOUtils;
+import org.elasticsearch.bootstrap.BootstrapSettings;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.test.ESTestCase;
 import org.junit.After;
@@ -66,5 +67,44 @@ public class KeyStoreWrapperTests extends ESTestCase {
             }
             assertEquals(-1, stream.read()); // nothing left
         }
+    }
+
+    public void testCreate() throws Exception {
+        KeyStoreWrapper keystore = KeyStoreWrapper.create(new char[0]);
+        assertTrue(keystore.getSettingNames().contains(KeyStoreWrapper.SEED_SETTING.getKey()));
+    }
+
+    public void testUpgradeNoop() throws Exception {
+        KeyStoreWrapper keystore = KeyStoreWrapper.create(new char[0]);
+        SecureString seed = keystore.getString(KeyStoreWrapper.SEED_SETTING.getKey());
+        keystore.save(env.configFile());
+        // upgrade does not overwrite seed
+        KeyStoreWrapper.upgrade(keystore, env.configFile());
+        assertEquals(seed.toString(), keystore.getString(KeyStoreWrapper.SEED_SETTING.getKey()).toString());
+        keystore = KeyStoreWrapper.load(env.configFile());
+        keystore.decrypt(new char[0]);
+        assertEquals(seed.toString(), keystore.getString(KeyStoreWrapper.SEED_SETTING.getKey()).toString());
+    }
+
+    public void testUpgradeAddsSeed() throws Exception {
+        KeyStoreWrapper keystore = KeyStoreWrapper.create(new char[0]);
+        keystore.remove(KeyStoreWrapper.SEED_SETTING.getKey());
+        keystore.save(env.configFile());
+        KeyStoreWrapper.upgrade(keystore, env.configFile());
+        SecureString seed = keystore.getString(KeyStoreWrapper.SEED_SETTING.getKey());
+        assertNotNull(seed);
+        keystore = KeyStoreWrapper.load(env.configFile());
+        keystore.decrypt(new char[0]);
+        assertEquals(seed.toString(), keystore.getString(KeyStoreWrapper.SEED_SETTING.getKey()).toString());
+    }
+
+    public void testIllegalSettingName() throws Exception {
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> KeyStoreWrapper.validateSettingName("UpperCase"));
+        assertTrue(e.getMessage().contains("does not match the allowed setting name pattern"));
+        KeyStoreWrapper keystore = KeyStoreWrapper.create(new char[0]);
+        e = expectThrows(IllegalArgumentException.class, () -> keystore.setString("UpperCase", new char[0]));
+        assertTrue(e.getMessage().contains("does not match the allowed setting name pattern"));
+        e = expectThrows(IllegalArgumentException.class, () -> keystore.setFile("UpperCase", new byte[0]));
+        assertTrue(e.getMessage().contains("does not match the allowed setting name pattern"));
     }
 }

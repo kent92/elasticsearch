@@ -16,9 +16,11 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+
 package org.apache.lucene.queries;
 
 import org.apache.lucene.index.BinaryDocValues;
+import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.ConstantScoreScorer;
 import org.apache.lucene.search.ConstantScoreWeight;
@@ -37,15 +39,18 @@ public final class BinaryDocValuesRangeQuery extends Query {
 
     private final String fieldName;
     private final QueryType queryType;
+    private final LengthType lengthType;
     private final BytesRef from;
     private final BytesRef to;
     private final Object originalFrom;
     private final Object originalTo;
 
-    public BinaryDocValuesRangeQuery(String fieldName, QueryType queryType, BytesRef from, BytesRef to,
+    public BinaryDocValuesRangeQuery(String fieldName, QueryType queryType, LengthType lengthType,
+                                     BytesRef from, BytesRef to,
                                      Object originalFrom, Object originalTo) {
         this.fieldName = fieldName;
         this.queryType = queryType;
+        this.lengthType = lengthType;
         this.from = from;
         this.to = to;
         this.originalFrom = originalFrom;
@@ -66,29 +71,34 @@ public final class BinaryDocValuesRangeQuery extends Query {
                 final TwoPhaseIterator iterator = new TwoPhaseIterator(values) {
 
                     ByteArrayDataInput in = new ByteArrayDataInput();
-                    BytesRef otherFrom = new BytesRef(16);
-                    BytesRef otherTo = new BytesRef(16);
+                    BytesRef otherFrom = new BytesRef();
+                    BytesRef otherTo = new BytesRef();
 
                     @Override
                     public boolean matches() throws IOException {
                         BytesRef encodedRanges = values.binaryValue();
                         in.reset(encodedRanges.bytes, encodedRanges.offset, encodedRanges.length);
                         int numRanges = in.readVInt();
+                        final byte[] bytes = encodedRanges.bytes;
+                        otherFrom.bytes = bytes;
+                        otherTo.bytes = bytes;
+                        int offset = in.getPosition();
                         for (int i = 0; i < numRanges; i++) {
-                            otherFrom.length = in.readVInt();
-                            otherFrom.bytes = encodedRanges.bytes;
-                            otherFrom.offset = in.getPosition();
-                            in.skipBytes(otherFrom.length);
+                            int length = lengthType.readLength(bytes, offset);
+                            otherFrom.offset = offset;
+                            otherFrom.length = length;
+                            offset += length;
 
-                            otherTo.length = in.readVInt();
-                            otherTo.bytes = encodedRanges.bytes;
-                            otherTo.offset = in.getPosition();
-                            in.skipBytes(otherTo.length);
+                            length = lengthType.readLength(bytes, offset);
+                            otherTo.offset = offset;
+                            otherTo.length = length;
+                            offset += length;
 
                             if (queryType.matches(from, to, otherFrom, otherTo)) {
                                 return true;
                             }
                         }
+                        assert offset == encodedRanges.offset + encodedRanges.length;
                         return false;
                     }
 
@@ -98,6 +108,11 @@ public final class BinaryDocValuesRangeQuery extends Query {
                     }
                 };
                 return new ConstantScoreScorer(this, score(), iterator);
+            }
+
+            @Override
+            public boolean isCacheable(LeafReaderContext ctx) {
+                return DocValues.isCacheable(ctx, fieldName);
             }
         };
     }
@@ -114,13 +129,14 @@ public final class BinaryDocValuesRangeQuery extends Query {
         BinaryDocValuesRangeQuery that = (BinaryDocValuesRangeQuery) o;
         return Objects.equals(fieldName, that.fieldName) &&
                 queryType == that.queryType &&
+                lengthType == that.lengthType &&
                 Objects.equals(from, that.from) &&
                 Objects.equals(to, that.to);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(getClass(), fieldName, queryType, from, to);
+        return Objects.hash(getClass(), fieldName, queryType, lengthType, from, to);
     }
 
     public enum QueryType {
@@ -161,4 +177,42 @@ public final class BinaryDocValuesRangeQuery extends Query {
 
     }
 
+    public enum LengthType {
+        FIXED_4 {
+            @Override
+            int readLength(byte[] bytes, int offset) {
+                return 4;
+            }
+        },
+        FIXED_8 {
+            @Override
+            int readLength(byte[] bytes, int offset) {
+                return 8;
+            }
+        },
+        FIXED_16 {
+            @Override
+            int readLength(byte[] bytes, int offset) {
+                return 16;
+            }
+        },
+        VARIABLE {
+            @Override
+            int readLength(byte[] bytes, int offset) {
+                // the first bit encodes the sign and the next 4 bits encode the number
+                // of additional bytes
+                int token = Byte.toUnsignedInt(bytes[offset]);
+                int length = (token >>> 3) & 0x0f;
+                if ((token & 0x80) == 0) {
+                    length = 0x0f - length;
+                }
+                return 1 + length;
+            }
+        };
+
+        /**
+         * Return the length of the value that starts at {@code offset} in {@code bytes}.
+         */
+        abstract int readLength(byte[] bytes, int offset);
+    }
 }

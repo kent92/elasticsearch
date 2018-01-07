@@ -105,10 +105,10 @@ public class IndicesServiceTests extends ESSingleNodeTestCase {
         @Override
         public void onIndexModule(IndexModule indexModule) {
             super.onIndexModule(indexModule);
-            indexModule.addSimilarity("fake-similarity", BM25SimilarityProvider::new);
+            indexModule.addSimilarity("fake-similarity",
+                    (name, settings, indexSettings, scriptService) -> new BM25SimilarityProvider(name, settings, indexSettings));
         }
     }
-
 
     @Override
     protected boolean resetNodeAfterTest() {
@@ -240,7 +240,7 @@ public class IndicesServiceTests extends ESSingleNodeTestCase {
             assertEquals(indicesService.numPendingDeletes(test.index()), 0);
             assertTrue(indicesService.hasUncompletedPendingDeletes()); // "bogus" index has not been removed
         }
-        assertAcked(client().admin().indices().prepareOpen("test"));
+        assertAcked(client().admin().indices().prepareOpen("test").setTimeout(TimeValue.timeValueSeconds(1)));
 
     }
 
@@ -429,5 +429,13 @@ public class IndicesServiceTests extends ESSingleNodeTestCase {
         assertThat(indexStats.isEmpty(), equalTo(false));
         assertThat("index not defined", indexStats.containsKey(index), equalTo(true));
         assertThat("unexpected shard stats", indexStats.get(index), equalTo(shardStats));
+    }
+
+    public void testIsMetaDataField() {
+        IndicesService indicesService = getIndicesService();
+        assertFalse(indicesService.isMetaDataField(randomAlphaOfLengthBetween(10, 15)));
+        for (String builtIn : IndicesModule.getBuiltInMetaDataFields()) {
+            assertTrue(indicesService.isMetaDataField(builtIn));
+        }
     }
 }

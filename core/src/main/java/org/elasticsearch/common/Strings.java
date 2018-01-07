@@ -20,6 +20,7 @@
 package org.elasticsearch.common;
 
 import org.apache.lucene.util.BytesRefBuilder;
+import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.FastStringReader;
@@ -36,11 +37,11 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Set;
 import java.util.StringTokenizer;
 import java.util.TreeSet;
+import java.util.function.Supplier;
 
 import static java.util.Collections.unmodifiableSet;
 import static org.elasticsearch.common.util.set.Sets.newHashSet;
@@ -410,62 +411,27 @@ public class Strings {
         return collection.toArray(new String[collection.size()]);
     }
 
-    public static Set<String> splitStringByCommaToSet(final String s) {
-        return splitStringToSet(s, ',');
-    }
-
-    public static String[] splitStringByCommaToArray(final String s) {
-        if (s == null || s.isEmpty()) return Strings.EMPTY_ARRAY;
-        else return s.split(",");
+    /**
+     * Tokenize the specified string by commas to a set, trimming whitespace and ignoring empty tokens.
+     *
+     * @param s the string to tokenize
+     * @return the set of tokens
+     */
+    public static Set<String> tokenizeByCommaToSet(final String s) {
+        if (s == null) return Collections.emptySet();
+        return tokenizeToCollection(s, ",", HashSet::new);
     }
 
     /**
-     * A convenience method for splitting a delimited string into
-     * a set and trimming leading and trailing whitespace from all
-     * split strings.
+     * Split the specified string by commas to an array.
      *
      * @param s the string to split
-     * @param c the delimiter to split on
-     * @return the set of split strings
+     * @return the array of split values
+     * @see String#split(String)
      */
-    public static Set<String> splitStringToSet(final String s, final char c) {
-        if (s == null || s.isEmpty()) {
-            return Collections.emptySet();
-        }
-        final char[] chars = s.toCharArray();
-        int count = 1;
-        for (final char x : chars) {
-            if (x == c) {
-                count++;
-            }
-        }
-        final Set<String> result = new HashSet<>(count);
-        final int len = chars.length;
-        int start = 0;  // starting index in chars of the current substring.
-        int pos = 0;    // current index in chars.
-        int end = 0; // the position of the end of the current token
-        for (; pos < len; pos++) {
-            if (chars[pos] == c) {
-                int size = end - start;
-                if (size > 0) { // only add non empty strings
-                    result.add(new String(chars, start, size));
-                }
-                start = pos + 1;
-                end = start;
-            } else if (Character.isWhitespace(chars[pos])) {
-                if (start == pos) {
-                    // skip over preceding whitespace
-                    start++;
-                }
-            } else {
-                end = pos + 1;
-            }
-        }
-        int size = end - start;
-        if (size > 0) {
-            result.add(new String(chars, start, size));
-        }
-        return result;
+    public static String[] splitStringByCommaToArray(final String s) {
+        if (s == null || s.isEmpty()) return Strings.EMPTY_ARRAY;
+        else return s.split(",");
     }
 
     /**
@@ -499,7 +465,7 @@ public class Strings {
      * tokens. A delimiter is always a single character; for multi-character
      * delimiters, consider using <code>delimitedListToStringArray</code>
      *
-     * @param str        the String to tokenize
+     * @param s        the String to tokenize
      * @param delimiters the delimiter characters, assembled as String
      *                   (each of those characters is individually considered as delimiter).
      * @return an array of the tokens
@@ -507,48 +473,35 @@ public class Strings {
      * @see java.lang.String#trim()
      * @see #delimitedListToStringArray
      */
-    public static String[] tokenizeToStringArray(String str, String delimiters) {
-        return tokenizeToStringArray(str, delimiters, true, true);
+    public static String[] tokenizeToStringArray(final String s, final String delimiters) {
+        return toStringArray(tokenizeToCollection(s, delimiters, ArrayList::new));
     }
 
     /**
-     * Tokenize the given String into a String array via a StringTokenizer.
-     * <p>The given delimiters string is supposed to consist of any number of
-     * delimiter characters. Each of those characters can be used to separate
-     * tokens. A delimiter is always a single character; for multi-character
-     * delimiters, consider using <code>delimitedListToStringArray</code>
+     * Tokenizes the specified string to a collection using the specified delimiters as the token delimiters. This method trims whitespace
+     * from tokens and ignores empty tokens.
      *
-     * @param str               the String to tokenize
-     * @param delimiters        the delimiter characters, assembled as String
-     *                          (each of those characters is individually considered as delimiter)
-     * @param trimTokens        trim the tokens via String's <code>trim</code>
-     * @param ignoreEmptyTokens omit empty tokens from the result array
-     *                          (only applies to tokens that are empty after trimming; StringTokenizer
-     *                          will not consider subsequent delimiters as token in the first place).
-     * @return an array of the tokens (<code>null</code> if the input String
-     *         was <code>null</code>)
+     * @param s          the string to tokenize.
+     * @param delimiters the token delimiters
+     * @param supplier   a collection supplier
+     * @param <T>        the type of the collection
+     * @return the tokens
      * @see java.util.StringTokenizer
-     * @see java.lang.String#trim()
-     * @see #delimitedListToStringArray
      */
-    public static String[] tokenizeToStringArray(
-            String str, String delimiters, boolean trimTokens, boolean ignoreEmptyTokens) {
-
-        if (str == null) {
+    private static <T extends Collection<String>> T tokenizeToCollection(
+            final String s, final String delimiters, final Supplier<T> supplier) {
+        if (s == null) {
             return null;
         }
-        StringTokenizer st = new StringTokenizer(str, delimiters);
-        List<String> tokens = new ArrayList<>();
-        while (st.hasMoreTokens()) {
-            String token = st.nextToken();
-            if (trimTokens) {
-                token = token.trim();
-            }
-            if (!ignoreEmptyTokens || token.length() > 0) {
+        final StringTokenizer tokenizer = new StringTokenizer(s, delimiters);
+        final T tokens = supplier.get();
+        while (tokenizer.hasMoreTokens()) {
+            final String token = tokenizer.nextToken().trim();
+            if (token.length() > 0) {
                 tokens.add(token);
             }
         }
-        return toStringArray(tokens);
+        return tokens;
     }
 
     /**
@@ -792,11 +745,22 @@ public class Strings {
 
     /**
      * Return a {@link String} that is the json representation of the provided {@link ToXContent}.
-     * Wraps the output into an anonymous object.
+     * Wraps the output into an anonymous object if needed. The content is not pretty-printed
+     * nor human readable.
      */
     public static String toString(ToXContent toXContent) {
+        return toString(toXContent, false, false);
+    }
+
+    /**
+     * Return a {@link String} that is the json representation of the provided {@link ToXContent}.
+     * Wraps the output into an anonymous object if needed. Allows to control whether the outputted
+     * json needs to be pretty printed and human readable.
+     *
+     */
+    public static String toString(ToXContent toXContent, boolean pretty, boolean human) {
         try {
-            XContentBuilder builder = JsonXContent.contentBuilder();
+            XContentBuilder builder = createBuilder(pretty, human);
             if (toXContent.isFragment()) {
                 builder.startObject();
             }
@@ -806,8 +770,28 @@ public class Strings {
             }
             return builder.string();
         } catch (IOException e) {
-            return "Error building toString out of XContent: " + ExceptionsHelper.stackTrace(e);
+            try {
+                XContentBuilder builder = createBuilder(pretty, human);
+                builder.startObject();
+                builder.field("error", "error building toString out of XContent: " + e.getMessage());
+                builder.field("stack_trace", ExceptionsHelper.stackTrace(e));
+                builder.endObject();
+                return builder.string();
+            } catch (IOException e2) {
+                throw new ElasticsearchException("cannot generate error message for deserialization", e);
+            }
         }
+    }
+
+    private static XContentBuilder createBuilder(boolean pretty, boolean human) throws IOException {
+        XContentBuilder builder = JsonXContent.contentBuilder();
+        if (pretty) {
+            builder.prettyPrint();
+        }
+        if (human) {
+            builder.humanReadable(true);
+        }
+        return builder;
     }
 
     /**

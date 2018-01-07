@@ -21,6 +21,8 @@ package org.elasticsearch.gradle
 import com.carrotsearch.gradle.junit4.RandomizedTestingTask
 import nebula.plugin.extraconfigurations.ProvidedBasePlugin
 import org.apache.tools.ant.taskdefs.condition.Os
+import org.eclipse.jgit.lib.Constants
+import org.eclipse.jgit.lib.RepositoryBuilder
 import org.elasticsearch.gradle.precommit.PrecommitTasks
 import org.gradle.api.GradleException
 import org.gradle.api.InvalidUserDataException
@@ -30,7 +32,6 @@ import org.gradle.api.Project
 import org.gradle.api.Task
 import org.gradle.api.XmlProvider
 import org.gradle.api.artifacts.Configuration
-import org.gradle.api.artifacts.Dependency
 import org.gradle.api.artifacts.ModuleDependency
 import org.gradle.api.artifacts.ModuleVersionIdentifier
 import org.gradle.api.artifacts.ProjectDependency
@@ -42,13 +43,13 @@ import org.gradle.api.publish.maven.plugins.MavenPublishPlugin
 import org.gradle.api.publish.maven.tasks.GenerateMavenPom
 import org.gradle.api.tasks.bundling.Jar
 import org.gradle.api.tasks.compile.JavaCompile
+import org.gradle.api.tasks.javadoc.Javadoc
 import org.gradle.internal.jvm.Jvm
 import org.gradle.process.ExecResult
 import org.gradle.util.GradleVersion
 
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
-
 /**
  * Encapsulates build configuration for elasticsearch projects.
  */
@@ -79,12 +80,13 @@ class BuildPlugin implements Plugin<Project> {
         configureConfigurations(project)
         project.ext.versions = VersionProperties.versions
         configureCompile(project)
-        configureJavadocJar(project)
+        configureJavadoc(project)
         configureSourcesJar(project)
         configurePomGeneration(project)
 
         configureTest(project)
         configurePrecommit(project)
+        configureDependenciesInfo(project)
     }
 
     /** Performs checks on the build environment and prints information about the build environment. */
@@ -123,9 +125,11 @@ class BuildPlugin implements Plugin<Project> {
             }
             println "  Random Testing Seed   : ${project.testSeed}"
 
-            // enforce gradle version
-            GradleVersion minGradle = GradleVersion.version('3.3')
-            if (GradleVersion.current() < minGradle) {
+            // enforce Gradle version
+            final GradleVersion currentGradleVersion = GradleVersion.current();
+
+            final GradleVersion minGradle = GradleVersion.version('4.3')
+            if (currentGradleVersion < minGradle) {
                 throw new GradleException("${minGradle} or above is required to build elasticsearch")
             }
 
@@ -231,7 +235,7 @@ class BuildPlugin implements Plugin<Project> {
 
     /** Return the configuration name used for finding transitive deps of the given dependency. */
     private static String transitiveDepConfigName(String groupId, String artifactId, String version) {
-        return "_transitive_${groupId}:${artifactId}:${version}"
+        return "_transitive_${groupId}_${artifactId}_${version}"
     }
 
     /**
@@ -270,8 +274,8 @@ class BuildPlugin implements Plugin<Project> {
         })
 
         // force all dependencies added directly to compile/testCompile to be non-transitive, except for ES itself
-        Closure disableTransitiveDeps = { Dependency dep ->
-            if (dep instanceof ModuleDependency && !(dep instanceof ProjectDependency) && dep.group.startsWith('org.elasticsearch') == false) {
+        Closure disableTransitiveDeps = { ModuleDependency dep ->
+            if (!(dep instanceof ProjectDependency) && dep.group.startsWith('org.elasticsearch') == false) {
                 dep.transitive = false
 
                 // also create a configuration just for this dependency version, so that later
@@ -289,7 +293,7 @@ class BuildPlugin implements Plugin<Project> {
         project.configurations.provided.dependencies.all(disableTransitiveDeps)
     }
 
-    /** Adds repositores used by ES dependencies */
+    /** Adds repositories used by ES dependencies */
     static void configureRepositories(Project project) {
         RepositoryHandler repos = project.repositories
         if (System.getProperty("repos.mavenlocal") != null) {
@@ -406,10 +410,15 @@ class BuildPlugin implements Plugin<Project> {
 
     /** Adds compiler settings to the project */
     static void configureCompile(Project project) {
-        project.ext.compactProfile = 'compact3'
+        if (project.javaVersion < JavaVersion.VERSION_1_10) {
+            project.ext.compactProfile = 'compact3'
+        } else {
+            project.ext.compactProfile = 'full'
+        }
         project.afterEvaluate {
-            // fail on all javac warnings
             project.tasks.withType(JavaCompile) {
+                File gradleJavaHome = Jvm.current().javaHome
+                // we fork because compiling lots of different classes in a shared jvm can eventually trigger GC overhead limitations
                 options.fork = true
                 options.forkOptions.executable = new File(project.javaHome, 'bin/javac')
                 options.forkOptions.memoryMaximumSize = "1g"
@@ -426,6 +435,7 @@ class BuildPlugin implements Plugin<Project> {
                  * -serial because we don't use java serialization.
                  */
                 // don't even think about passing args with -J-xxx, oracle will ask you to submit a bug report :)
+                // fail on all javac warnings
                 options.compilerArgs << '-Werror' << '-Xlint:all,-path,-serial,-options,-deprecation' << '-Xdoclint:all' << '-Xdoclint:-missing'
 
                 // either disable annotation processor completely (default) or allow to enable them if an annotation processor is explicitly defined
@@ -440,12 +450,19 @@ class BuildPlugin implements Plugin<Project> {
                     // hack until gradle supports java 9's new "--release" arg
                     assert minimumJava == JavaVersion.VERSION_1_8
                     options.compilerArgs << '--release' << '8'
-                    doFirst{
-                        sourceCompatibility = null
-                        targetCompatibility = null
-                    }
                 }
             }
+        }
+    }
+
+    static void configureJavadoc(Project project) {
+        project.tasks.withType(Javadoc) {
+            executable = new File(project.javaHome, 'bin/javadoc')
+        }
+        configureJavadocJar(project)
+        if (project.javaVersion == JavaVersion.VERSION_1_10) {
+            project.tasks.withType(Javadoc) { it.enabled = false }
+            project.tasks.getByName('javadocJar').each { it.enabled = false }
         }
     }
 
@@ -468,8 +485,10 @@ class BuildPlugin implements Plugin<Project> {
         project.assemble.dependsOn(sourcesJarTask)
     }
 
-    /** Adds additional manifest info to jars, and adds source and javadoc jars */
+    /** Adds additional manifest info to jars */
     static void configureJars(Project project) {
+        project.ext.licenseFile = null
+        project.ext.noticeFile = null
         project.tasks.withType(Jar) { Jar jarTask ->
             // we put all our distributable files under distributions
             jarTask.destinationDir = new File(project.buildDir, 'distributions')
@@ -491,6 +510,31 @@ class BuildPlugin implements Plugin<Project> {
                 if (jarTask.manifest.attributes.containsKey('Change') == false) {
                     logger.warn('Building without git revision id.')
                     jarTask.manifest.attributes('Change': 'Unknown')
+                } else {
+                    /*
+                     * The info-scm plugin assumes that if GIT_COMMIT is set it was set by Jenkins to the commit hash for this build.
+                     * However, that assumption is wrong as this build could be a sub-build of another Jenkins build for which GIT_COMMIT
+                     * is the commit hash for that build. Therefore, if GIT_COMMIT is set we calculate the commit hash ourselves.
+                     */
+                    if (System.getenv("GIT_COMMIT") != null) {
+                        final String hash = new RepositoryBuilder().findGitDir(project.buildDir).build().resolve(Constants.HEAD).name
+                        final String shortHash = hash?.substring(0, 7)
+                        jarTask.manifest.attributes('Change': shortHash)
+                    }
+                }
+            }
+            // add license/notice files
+            project.afterEvaluate {
+                if (project.licenseFile == null || project.noticeFile == null) {
+                    throw new GradleException("Must specify license and notice file for project ${project.path}")
+                }
+                jarTask.into('META-INF') {
+                    from(project.licenseFile.parent) {
+                        include project.licenseFile.name
+                    }
+                    from(project.noticeFile.parent) {
+                        include project.noticeFile.name
+                    }
                 }
             }
         }
@@ -521,8 +565,6 @@ class BuildPlugin implements Plugin<Project> {
             systemProperty 'tests.artifact', project.name
             systemProperty 'tests.task', path
             systemProperty 'tests.security.manager', 'true'
-            // Breaking change in JDK-9, revert to JDK-8 behavior for now, see https://github.com/elastic/elasticsearch/issues/21534
-            systemProperty 'jdk.io.permissionsUseCanonicalPath', 'true'
             systemProperty 'jna.nosys', 'true'
             // default test sysprop values
             systemProperty 'tests.ifNoTests', 'fail'
@@ -607,5 +649,10 @@ class BuildPlugin implements Plugin<Project> {
         project.check.dependsOn(precommit)
         project.test.mustRunAfter(precommit)
         project.dependencyLicenses.dependencies = project.configurations.runtime - project.configurations.provided
+    }
+
+    private static configureDependenciesInfo(Project project) {
+        Task deps = project.tasks.create("dependenciesInfo", DependenciesInfoTask.class)
+        deps.dependencies = project.configurations.compile.allDependencies
     }
 }

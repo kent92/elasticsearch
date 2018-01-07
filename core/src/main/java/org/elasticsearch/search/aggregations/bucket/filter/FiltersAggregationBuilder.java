@@ -31,8 +31,9 @@ import org.elasticsearch.index.query.Rewriteable;
 import org.elasticsearch.search.aggregations.AbstractAggregationBuilder;
 import org.elasticsearch.search.aggregations.AggregationBuilder;
 import org.elasticsearch.search.aggregations.AggregatorFactories.Builder;
-import org.elasticsearch.search.aggregations.bucket.filter.FiltersAggregator.KeyedFilter;
 import org.elasticsearch.search.aggregations.AggregatorFactory;
+import org.elasticsearch.search.aggregations.bucket.MultiBucketAggregationBuilder;
+import org.elasticsearch.search.aggregations.bucket.filter.FiltersAggregator.KeyedFilter;
 import org.elasticsearch.search.internal.SearchContext;
 
 import java.io.IOException;
@@ -44,7 +45,8 @@ import java.util.Objects;
 
 import static org.elasticsearch.index.query.AbstractQueryBuilder.parseInnerQueryBuilder;
 
-public class FiltersAggregationBuilder extends AbstractAggregationBuilder<FiltersAggregationBuilder> {
+public class FiltersAggregationBuilder extends AbstractAggregationBuilder<FiltersAggregationBuilder>
+        implements MultiBucketAggregationBuilder {
     public static final String NAME = "filters";
 
     private static final ParseField FILTERS_FIELD = new ParseField("filters");
@@ -63,15 +65,19 @@ public class FiltersAggregationBuilder extends AbstractAggregationBuilder<Filter
      *            the KeyedFilters to use with this aggregation.
      */
     public FiltersAggregationBuilder(String name, KeyedFilter... filters) {
-        this(name, Arrays.asList(filters));
+        this(name, Arrays.asList(filters), true);
     }
 
-    private FiltersAggregationBuilder(String name, List<KeyedFilter> filters) {
+    private FiltersAggregationBuilder(String name, List<KeyedFilter> filters, boolean keyed) {
         super(name);
-        // internally we want to have a fixed order of filters, regardless of the order of the filters in the request
         this.filters = new ArrayList<>(filters);
-        Collections.sort(this.filters, (KeyedFilter kf1, KeyedFilter kf2) -> kf1.key().compareTo(kf2.key()));
-        this.keyed = true;
+        if (keyed) {
+            // internally we want to have a fixed order of filters, regardless of the order of the filters in the request
+            Collections.sort(this.filters, (KeyedFilter kf1, KeyedFilter kf2) -> kf1.key().compareTo(kf2.key()));
+            this.keyed = true;
+        } else {
+            this.keyed = false;
+        }
     }
 
     /**
@@ -151,6 +157,13 @@ public class FiltersAggregationBuilder extends AbstractAggregationBuilder<Filter
     }
 
     /**
+     * @return true if this builders filters have a key
+     */
+    public boolean isKeyed() {
+        return this.keyed;
+    }
+
+    /**
      * Set the key to use for the bucket for documents not matching any
      * filter.
      */
@@ -182,7 +195,7 @@ public class FiltersAggregationBuilder extends AbstractAggregationBuilder<Filter
             }
         }
         if (changed) {
-            return new FiltersAggregationBuilder(getName(), rewrittenFilters);
+            return new FiltersAggregationBuilder(getName(), rewrittenFilters, this.keyed);
         } else {
             return this;
         }

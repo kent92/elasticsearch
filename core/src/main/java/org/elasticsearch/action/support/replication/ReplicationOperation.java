@@ -173,6 +173,7 @@ public class ReplicationOperation<
                 successfulShards.incrementAndGet();
                 try {
                     primary.updateLocalCheckpointForShard(shard.allocationId().getId(), response.localCheckpoint());
+                    primary.updateGlobalCheckpointForShard(shard.allocationId().getId(), response.globalCheckpoint());
                 } catch (final AlreadyClosedException e) {
                     // okay, the index was deleted or this shard was never activated after a relocation; fall through and finish normally
                 } catch (final Exception e) {
@@ -316,6 +317,14 @@ public class ReplicationOperation<
         void updateLocalCheckpointForShard(String allocationId, long checkpoint);
 
         /**
+         * Update the local knowledge of the global checkpoint for the specified allocation ID.
+         *
+         * @param allocationId     the allocation ID to update the global checkpoint for
+         * @param globalCheckpoint the global checkpoint
+         */
+        void updateGlobalCheckpointForShard(String allocationId, long globalCheckpoint);
+
+        /**
          * Returns the local checkpoint on the primary shard.
          *
          * @return the local checkpoint
@@ -343,7 +352,7 @@ public class ReplicationOperation<
     public interface Replicas<RequestT extends ReplicationRequest<RequestT>> {
 
         /**
-         * Performs the the specified request on the specified replica.
+         * Performs the specified request on the specified replica.
          *
          * @param replica          the shard this request should be executed on
          * @param replicaRequest   the operation to perform
@@ -385,12 +394,24 @@ public class ReplicationOperation<
     }
 
     /**
-     * An interface to encapsulate the metadata needed from replica shards when they respond to operations performed on them
+     * An interface to encapsulate the metadata needed from replica shards when they respond to operations performed on them.
      */
     public interface ReplicaResponse {
 
-        /** the local check point for the shard. see {@link org.elasticsearch.index.seqno.SequenceNumbersService#getLocalCheckpoint()} */
+        /**
+         * The local checkpoint for the shard.
+         *
+         * @return the local checkpoint
+         **/
         long localCheckpoint();
+
+        /**
+         * The global checkpoint for the shard.
+         *
+         * @return the global checkpoint
+         **/
+        long globalCheckpoint();
+
     }
 
     public static class RetryOnPrimaryException extends ElasticsearchException {

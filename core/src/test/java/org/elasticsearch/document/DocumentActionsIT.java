@@ -81,7 +81,8 @@ public class DocumentActionsIT extends ESIntegTestCase {
         assertThat(indexExists("test1234565"), equalTo(false));
 
         logger.info("Clearing cache");
-        ClearIndicesCacheResponse clearIndicesCacheResponse = client().admin().indices().clearCache(clearIndicesCacheRequest("test").recycler(true).fieldDataCache(true).queryCache(true)).actionGet();
+        ClearIndicesCacheResponse clearIndicesCacheResponse = client().admin().indices().clearCache(clearIndicesCacheRequest("test")
+            .fieldDataCache(true).queryCache(true)).actionGet();
         assertNoFailures(clearIndicesCacheResponse);
         assertThat(clearIndicesCacheResponse.getSuccessfulShards(), equalTo(numShards.totalNumShards));
 
@@ -94,11 +95,11 @@ public class DocumentActionsIT extends ESIntegTestCase {
 
         logger.info("Get [type1/1]");
         for (int i = 0; i < 5; i++) {
-            getResult = client().prepareGet("test", "type1", "1").setOperationThreaded(false).execute().actionGet();
+            getResult = client().prepareGet("test", "type1", "1").execute().actionGet();
             assertThat(getResult.getIndex(), equalTo(getConcreteIndexName()));
             assertThat("cycle #" + i, getResult.getSourceAsString(), equalTo(source("1", "test").string()));
             assertThat("cycle(map) #" + i, (String) getResult.getSourceAsMap().get("name"), equalTo("test"));
-            getResult = client().get(getRequest("test").type("type1").id("1").operationThreaded(true)).actionGet();
+            getResult = client().get(getRequest("test").type("type1").id("1")).actionGet();
             assertThat("cycle #" + i, getResult.getSourceAsString(), equalTo(source("1", "test").string()));
             assertThat(getResult.getIndex(), equalTo(getConcreteIndexName()));
         }
@@ -160,7 +161,8 @@ public class DocumentActionsIT extends ESIntegTestCase {
         // check count
         for (int i = 0; i < 5; i++) {
             // test successful
-            SearchResponse countResponse = client().prepareSearch("test").setSize(0).setQuery(termQuery("_type", "type1")).execute().actionGet();
+            SearchResponse countResponse = client().prepareSearch("test").setSize(0).setQuery(termQuery("_type", "type1"))
+                .execute().actionGet();
             assertNoFailures(countResponse);
             assertThat(countResponse.getHits().getTotalHits(), equalTo(2L));
             assertThat(countResponse.getSuccessfulShards(), equalTo(numShards.numPrimaries));
@@ -168,7 +170,8 @@ public class DocumentActionsIT extends ESIntegTestCase {
 
             // count with no query is a match all one
             countResponse = client().prepareSearch("test").setSize(0).execute().actionGet();
-            assertThat("Failures " + countResponse.getShardFailures(), countResponse.getShardFailures() == null ? 0 : countResponse.getShardFailures().length, equalTo(0));
+            assertThat("Failures " + countResponse.getShardFailures(), countResponse.getShardFailures() == null ? 0
+                : countResponse.getShardFailures().length, equalTo(0));
             assertThat(countResponse.getHits().getTotalHits(), equalTo(2L));
             assertThat(countResponse.getSuccessfulShards(), equalTo(numShards.numPrimaries));
             assertThat(countResponse.getFailedShards(), equalTo(0));

@@ -19,7 +19,8 @@ class VagrantTestPlugin implements Plugin<Project> {
             'centos-7',
             'debian-8',
             'debian-9',
-            'fedora-25',
+            'fedora-26',
+            'fedora-27',
             'oel-6',
             'oel-7',
             'opensuse-42',
@@ -42,7 +43,7 @@ class VagrantTestPlugin implements Plugin<Project> {
 
     private static final BATS = 'bats'
     private static final String BATS_TEST_COMMAND ="cd \$BATS_ARCHIVES && sudo bats --tap \$BATS_TESTS/*.$BATS"
-    private static final String PLATFORM_TEST_COMMAND ="rm -rf ~/elasticsearch && rsync -r /elasticsearch/ ~/elasticsearch && cd ~/elasticsearch && \$GRADLE_HOME/bin/gradle test integTest"
+    private static final String PLATFORM_TEST_COMMAND ="rm -rf ~/elasticsearch && rsync -r /elasticsearch/ ~/elasticsearch && cd ~/elasticsearch && ./gradlew test integTest"
 
     @Override
     void apply(Project project) {
@@ -106,7 +107,8 @@ class VagrantTestPlugin implements Plugin<Project> {
         if (upgradeFromVersion == null) {
             String firstPartOfSeed = project.rootProject.testSeed.tokenize(':').get(0)
             final long seed = Long.parseUnsignedLong(firstPartOfSeed, 16)
-            upgradeFromVersion = project.indexCompatVersions[new Random(seed).nextInt(project.indexCompatVersions.size())]
+            final def indexCompatVersions = project.versionCollection.versionsIndexCompatibleWithCurrent
+            upgradeFromVersion = indexCompatVersions[new Random(seed).nextInt(indexCompatVersions.size())]
         }
 
         DISTRIBUTION_ARCHIVES.each {
@@ -342,7 +344,7 @@ class VagrantTestPlugin implements Plugin<Project> {
                 @Override
                 void afterExecute(Task task, TaskState state) {
                     if (state.failure != null) {
-                        println "REPRODUCE WITH: gradle ${packaging.path} " +
+                        println "REPRODUCE WITH: ./gradlew ${packaging.path} " +
                             "-Dtests.seed=${project.testSeed} "
                     }
                 }

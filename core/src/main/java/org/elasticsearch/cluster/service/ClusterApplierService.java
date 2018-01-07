@@ -97,14 +97,17 @@ public class ClusterApplierService extends AbstractLifecycleComponent implements
     private final AtomicReference<ClusterState> state; // last applied state
 
     private NodeConnectionsService nodeConnectionsService;
+    private Supplier<ClusterState.Builder> stateBuilderSupplier;
 
-    public ClusterApplierService(Settings settings, ClusterSettings clusterSettings, ThreadPool threadPool) {
+    public ClusterApplierService(Settings settings, ClusterSettings clusterSettings, ThreadPool threadPool, Supplier<ClusterState
+        .Builder> stateBuilderSupplier) {
         super(settings);
         this.clusterSettings = clusterSettings;
         this.threadPool = threadPool;
         this.state = new AtomicReference<>();
         this.slowTaskLoggingThreshold = CLUSTER_SERVICE_SLOW_TASK_LOGGING_THRESHOLD_SETTING.get(settings);
         this.localNodeMasterListeners = new LocalNodeMasterListeners(threadPool);
+        this.stateBuilderSupplier = stateBuilderSupplier;
     }
 
     public void setSlowTaskLoggingThreshold(TimeValue slowTaskLoggingThreshold) {
@@ -130,8 +133,11 @@ public class ClusterApplierService extends AbstractLifecycleComponent implements
         Objects.requireNonNull(nodeConnectionsService, "please set the node connection service before starting");
         Objects.requireNonNull(state.get(), "please set initial state before starting");
         addListener(localNodeMasterListeners);
-        threadPoolExecutor = EsExecutors.newSinglePrioritizing(CLUSTER_UPDATE_THREAD_NAME,
-            daemonThreadFactory(settings, CLUSTER_UPDATE_THREAD_NAME), threadPool.getThreadContext(), threadPool.scheduler());
+        threadPoolExecutor = EsExecutors.newSinglePrioritizing(
+                nodeName() + "/" + CLUSTER_UPDATE_THREAD_NAME,
+                daemonThreadFactory(settings, CLUSTER_UPDATE_THREAD_NAME),
+                threadPool.getThreadContext(),
+                threadPool.scheduler());
     }
 
     class UpdateTask extends SourcePrioritizedRunnable implements Function<ClusterState, ClusterState> {
@@ -652,5 +658,10 @@ public class ClusterApplierService extends AbstractLifecycleComponent implements
     // this one is overridden in tests so we can control time
     protected long currentTimeInNanos() {
         return System.nanoTime();
+    }
+
+    @Override
+    public ClusterState.Builder newClusterStateBuilder() {
+        return stateBuilderSupplier.get();
     }
 }

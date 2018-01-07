@@ -64,7 +64,7 @@ public class IntegerRandomBinaryDocValuesRangeQueryTests extends BaseRandomBinar
         }
     }
 
-    private static class IntTestRange extends AbstractRange {
+    private static class IntTestRange extends AbstractRange<Integer> {
         int min;
         int max;
 
@@ -74,7 +74,7 @@ public class IntegerRandomBinaryDocValuesRangeQueryTests extends BaseRandomBinar
         }
 
         @Override
-        public Object getMin() {
+        public Integer getMin() {
             return min;
         }
 
@@ -90,7 +90,7 @@ public class IntegerRandomBinaryDocValuesRangeQueryTests extends BaseRandomBinar
         }
 
         @Override
-        public Object getMax() {
+        public Integer getMax() {
             return max;
         }
 

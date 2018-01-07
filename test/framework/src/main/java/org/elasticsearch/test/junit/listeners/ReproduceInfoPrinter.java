@@ -71,7 +71,7 @@ public class ReproduceInfoPrinter extends RunListener {
             return;
         }
 
-        final StringBuilder b = new StringBuilder("REPRODUCE WITH: gradle ");
+        final StringBuilder b = new StringBuilder("REPRODUCE WITH: ./gradlew ");
         String task = System.getProperty("tests.task");
         // TODO: enforce (intellij still runs the runner?) or use default "test" but that won't work for integ
         b.append(task);
@@ -141,7 +141,7 @@ public class ReproduceInfoPrinter extends RunListener {
                 appendProperties(ESIntegTestCase.TESTS_ENABLE_MOCK_MODULES);
             }
             appendProperties("tests.assertion.disabled", "tests.security.manager", "tests.nightly", "tests.jvms",
-                             "tests.client.ratio", "tests.heap.size", "tests.bwc", "tests.bwc.version");
+                             "tests.client.ratio", "tests.heap.size", "tests.bwc", "tests.bwc.version", "build.snapshot");
             if (System.getProperty("tests.jvm.argline") != null && !System.getProperty("tests.jvm.argline").isEmpty()) {
                 appendOpt("tests.jvm.argline", "\"" + System.getProperty("tests.jvm.argline") + "\"");
             }

@@ -33,7 +33,7 @@ import org.elasticsearch.cli.UserException;
 import org.elasticsearch.common.SuppressForbidden;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.hash.MessageDigests;
-import org.elasticsearch.common.io.FileSystemUtils;
+import org.elasticsearch.common.settings.KeyStoreWrapper;
 import org.elasticsearch.env.Environment;
 
 import java.io.BufferedReader;
@@ -42,6 +42,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.URI;
 import java.net.URL;
 import java.net.URLConnection;
 import java.net.URLDecoder;
@@ -57,12 +58,15 @@ import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
@@ -217,7 +221,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
         if (OFFICIAL_PLUGINS.contains(pluginId)) {
             final String url = getElasticUrl(terminal, getStagingHash(), Version.CURRENT, pluginId, Platforms.PLATFORM_NAME);
             terminal.println("-> Downloading " + pluginId + " from elastic");
-            return downloadZipAndChecksum(terminal, url, tmpDir);
+            return downloadZipAndChecksum(terminal, url, tmpDir, false);
         }
 
         // now try as maven coordinates, a valid URL would only have a colon and slash
@@ -225,7 +229,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
         if (coordinates.length == 3 && pluginId.contains("/") == false) {
             String mavenUrl = getMavenUrl(terminal, coordinates, Platforms.PLATFORM_NAME);
             terminal.println("-> Downloading " + pluginId + " from maven central");
-            return downloadZipAndChecksum(terminal, mavenUrl, tmpDir);
+            return downloadZipAndChecksum(terminal, mavenUrl, tmpDir, true);
         }
 
         // fall back to plain old URL
@@ -311,8 +315,9 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
     }
 
     /** Downloads a zip from the url, into a temp file under the given temp dir. */
+    // pkg private for tests
     @SuppressForbidden(reason = "We use getInputStream to download plugins")
-    private Path downloadZip(Terminal terminal, String urlString, Path tmpDir) throws IOException {
+    Path downloadZip(Terminal terminal, String urlString, Path tmpDir) throws IOException {
         terminal.println(VERBOSE, "Retrieving zip from " + urlString);
         URL url = new URL(urlString);
         Path zip = Files.createTempFile(tmpDir, null, ".zip");
@@ -360,30 +365,88 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
         }
     }
 
-    /** Downloads a zip from the url, as well as a SHA1 checksum, and checks the checksum. */
+    /** Downloads a zip from the url, as well as a SHA512 (or SHA1) checksum, and checks the checksum. */
     // pkg private for tests
     @SuppressForbidden(reason = "We use openStream to download plugins")
-    Path downloadZipAndChecksum(Terminal terminal, String urlString, Path tmpDir) throws Exception {
+    private Path downloadZipAndChecksum(Terminal terminal, String urlString, Path tmpDir, boolean allowSha1) throws Exception {
         Path zip = downloadZip(terminal, urlString, tmpDir);
         pathsToDeleteOnShutdown.add(zip);
-        URL checksumUrl = new URL(urlString + ".sha1");
+        String checksumUrlString = urlString + ".sha512";
+        URL checksumUrl = openUrl(checksumUrlString);
+        String digestAlgo = "SHA-512";
+        if (checksumUrl == null && allowSha1) {
+            // fallback to sha1, until 7.0, but with warning
+            terminal.println("Warning: sha512 not found, falling back to sha1. This behavior is deprecated and will be removed in a " +
+                             "future release. Please update the plugin to use a sha512 checksum.");
+            checksumUrlString = urlString + ".sha1";
+            checksumUrl = openUrl(checksumUrlString);
+            digestAlgo = "SHA-1";
+        }
+        if (checksumUrl == null) {
+            throw new UserException(ExitCodes.IO_ERROR, "Plugin checksum missing: " + checksumUrlString);
+        }
         final String expectedChecksum;
         try (InputStream in = checksumUrl.openStream()) {
-            BufferedReader checksumReader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-            expectedChecksum = checksumReader.readLine();
-            if (checksumReader.readLine() != null) {
-                throw new UserException(ExitCodes.IO_ERROR, "Invalid checksum file at " + checksumUrl);
+            /*
+             * The supported format of the SHA-1 files is a single-line file containing the SHA-1. The supported format of the SHA-512 files
+             * is a single-line file containing the SHA-512 and the filename, separated by two spaces. For SHA-1, we verify that the hash
+             * matches, and that the file contains a single line. For SHA-512, we verify that the hash and the filename match, and that the
+             * file contains a single line.
+             */
+            if (digestAlgo.equals("SHA-1")) {
+                final BufferedReader checksumReader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
+                expectedChecksum = checksumReader.readLine();
+                if (checksumReader.readLine() != null) {
+                    throw new UserException(ExitCodes.IO_ERROR, "Invalid checksum file at " + checksumUrl);
+                }
+            } else {
+                final BufferedReader checksumReader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
+                final String checksumLine = checksumReader.readLine();
+                final String[] fields = checksumLine.split(" {2}");
+                if (fields.length != 2) {
+                    throw new UserException(ExitCodes.IO_ERROR, "Invalid checksum file at " + checksumUrl);
+                }
+                expectedChecksum = fields[0];
+                final String[] segments = URI.create(urlString).getPath().split("/");
+                final String expectedFile = segments[segments.length - 1];
+                if (fields[1].equals(expectedFile) == false) {
+                    final String message = String.format(
+                            Locale.ROOT,
+                            "checksum file at [%s] is not for this plugin, expected [%s] but was [%s]",
+                            checksumUrl,
+                            expectedFile,
+                            fields[1]);
+                    throw new UserException(ExitCodes.IO_ERROR, message);
+                }
+                if (checksumReader.readLine() != null) {
+                    throw new UserException(ExitCodes.IO_ERROR, "Invalid checksum file at " + checksumUrl);
+                }
             }
         }
 
         byte[] zipbytes = Files.readAllBytes(zip);
-        String gotChecksum = MessageDigests.toHexString(MessageDigests.sha1().digest(zipbytes));
+        String gotChecksum = MessageDigests.toHexString(MessageDigest.getInstance(digestAlgo).digest(zipbytes));
         if (expectedChecksum.equals(gotChecksum) == false) {
             throw new UserException(ExitCodes.IO_ERROR,
-                "SHA1 mismatch, expected " + expectedChecksum + " but got " + gotChecksum);
+                digestAlgo + " mismatch, expected " + expectedChecksum + " but got " + gotChecksum);
         }
 
         return zip;
+    }
+
+    /**
+     * Creates a URL and opens a connection.
+     *
+     * If the URL returns a 404, {@code null} is returned, otherwise the open URL opject is returned.
+     */
+    // pkg private for tests
+    URL openUrl(String urlString) throws Exception {
+        URL checksumUrl = new URL(urlString);
+        HttpURLConnection connection = (HttpURLConnection)checksumUrl.openConnection();
+        if (connection.getResponseCode() == 404) {
+            return null;
+        }
+        return checksumUrl;
     }
 
     private Path unzip(Path zip, Path pluginsDir) throws IOException, UserException {
@@ -493,7 +556,7 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
         }
 
         // check for jar hell before any copying
-        jarHellCheck(pluginRoot, env.pluginsFile());
+        jarHellCheck(info, pluginRoot, env.pluginsFile(), env.modulesFile());
 
         // read optional security policy (extra permissions)
         // if it exists, confirm or warn the user
@@ -506,25 +569,25 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
     }
 
     /** check a candidate plugin for jar hell before installing it */
-    void jarHellCheck(Path candidate, Path pluginsDir) throws Exception {
+    void jarHellCheck(PluginInfo info, Path candidate, Path pluginsDir, Path modulesDir) throws Exception {
         // create list of current jars in classpath
         final Set<URL> jars = new HashSet<>(JarHell.parseClassPath());
 
         // read existing bundles. this does some checks on the installation too.
-        PluginsService.getPluginBundles(pluginsDir);
+        Set<PluginsService.Bundle> bundles = new HashSet<>(PluginsService.getPluginBundles(pluginsDir));
+        bundles.addAll(PluginsService.getModuleBundles(modulesDir));
+        bundles.add(new PluginsService.Bundle(info, candidate));
+        List<PluginsService.Bundle> sortedBundles = PluginsService.sortBundles(bundles);
 
-        // add plugin jars to the list
-        Path pluginJars[] = FileSystemUtils.files(candidate, "*.jar");
-        for (Path jar : pluginJars) {
-            if (jars.add(jar.toUri().toURL()) == false) {
-                throw new IllegalStateException("jar hell! duplicate plugin jar: " + jar);
-            }
+        // check jarhell of all plugins so we know this plugin and anything depending on it are ok together
+        // TODO: optimize to skip any bundles not connected to the candidate plugin?
+        Map<String, Set<URL>> transitiveUrls = new HashMap<>();
+        for (PluginsService.Bundle bundle : sortedBundles) {
+            PluginsService.checkBundleJarHell(bundle, transitiveUrls);
         }
+
         // TODO: no jars should be an error
         // TODO: verify the classname exists in one of the jars!
-
-        // check combined (current classpath + new jars to-be-added)
-        JarHell.checkJarHell(jars);
     }
 
     /**
@@ -571,6 +634,15 @@ class InstallPluginCommand extends EnvironmentAwareCommand {
                     return FileVisitResult.CONTINUE;
                 }
             });
+
+            if (info.requiresKeystore()) {
+                KeyStoreWrapper keystore = KeyStoreWrapper.load(env.configFile());
+                if (keystore == null) {
+                    terminal.println("Elasticsearch keystore is required by plugin [" + info.getName() + "], creating...");
+                    keystore = KeyStoreWrapper.create(new char[0]);
+                    keystore.save(env.configFile());
+                }
+            }
 
             terminal.println("-> Installed " + info.getName());
 

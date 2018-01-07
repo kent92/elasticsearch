@@ -20,8 +20,6 @@
 package org.apache.lucene.search.uhighlight;
 
 import org.apache.lucene.analysis.Analyzer;
-import org.apache.lucene.index.FieldInfo;
-import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.queries.CommonTermsQuery;
 import org.apache.lucene.search.DocIdSetIterator;
@@ -37,10 +35,10 @@ import org.apache.lucene.search.spans.SpanTermQuery;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.automaton.CharacterRunAutomaton;
 import org.elasticsearch.common.Nullable;
-import org.elasticsearch.common.lucene.all.AllTermQuery;
 import org.elasticsearch.common.lucene.search.MultiPhrasePrefixQuery;
-import org.elasticsearch.common.lucene.search.function.FiltersFunctionScoreQuery;
 import org.elasticsearch.common.lucene.search.function.FunctionScoreQuery;
+import org.elasticsearch.index.IndexSettings;
+import org.elasticsearch.index.search.ESToParentBlockJoinQuery;
 
 import java.io.IOException;
 import java.text.BreakIterator;
@@ -70,6 +68,7 @@ public class CustomUnifiedHighlighter extends UnifiedHighlighter {
     private final BreakIterator breakIterator;
     private final Locale breakIteratorLocale;
     private final int noMatchSize;
+    private final int maxAnalyzedOffset;
 
     /**
      * Creates a new instance of {@link CustomUnifiedHighlighter}
@@ -84,6 +83,7 @@ public class CustomUnifiedHighlighter extends UnifiedHighlighter {
      *                    If null {@link BreakIterator#getSentenceInstance(Locale)} is used.
      * @param fieldValue the original field values delimited by MULTIVAL_SEP_CHAR.
      * @param noMatchSize The size of the text that should be returned when no highlighting can be performed.
+     * @param maxAnalyzedOffset The maximum number of characters that will be analyzed for highlighting.
      */
     public CustomUnifiedHighlighter(IndexSearcher searcher,
                                     Analyzer analyzer,
@@ -92,7 +92,8 @@ public class CustomUnifiedHighlighter extends UnifiedHighlighter {
                                     @Nullable Locale breakIteratorLocale,
                                     @Nullable BreakIterator breakIterator,
                                     String fieldValue,
-                                    int noMatchSize) {
+                                    int noMatchSize,
+                                    int maxAnalyzedOffset) {
         super(searcher, analyzer);
         this.offsetSource = offsetSource;
         this.breakIterator = breakIterator;
@@ -100,6 +101,7 @@ public class CustomUnifiedHighlighter extends UnifiedHighlighter {
         this.passageFormatter = passageFormatter;
         this.fieldValue = fieldValue;
         this.noMatchSize = noMatchSize;
+        this.maxAnalyzedOffset = maxAnalyzedOffset;
     }
 
     /**
@@ -123,6 +125,13 @@ public class CustomUnifiedHighlighter extends UnifiedHighlighter {
     @Override
     protected List<CharSequence[]> loadFieldValues(String[] fields, DocIdSetIterator docIter,
                                                    int cacheCharsThreshold) throws IOException {
+        if ((offsetSource == OffsetSource.ANALYSIS) && (fieldValue.length() > maxAnalyzedOffset)) {
+            throw new IllegalArgumentException(
+                "The length of the text to be analyzed for highlighting has exceeded the allowed maximum of [" +
+                    maxAnalyzedOffset + "]. " + "This maximum can be set by changing the [" +
+                    IndexSettings.MAX_ANALYZED_OFFSET_SETTING.getKey() + "] index level setting. " +
+                    "For large texts, indexing with offsets or term vectors is recommended!");
+        }
         // we only highlight one field, one document at a time
         return Collections.singletonList(new String[]{fieldValue});
     }
@@ -208,13 +217,10 @@ public class CustomUnifiedHighlighter extends UnifiedHighlighter {
                 tqs.add(new TermQuery(term));
             }
             return tqs;
-        } else if (query instanceof AllTermQuery) {
-            AllTermQuery atq = (AllTermQuery) query;
-            return Collections.singletonList(new TermQuery(atq.getTerm()));
         } else if (query instanceof FunctionScoreQuery) {
             return Collections.singletonList(((FunctionScoreQuery) query).getSubQuery());
-        } else if (query instanceof FiltersFunctionScoreQuery) {
-            return Collections.singletonList(((FiltersFunctionScoreQuery) query).getSubQuery());
+        } else if (query instanceof ESToParentBlockJoinQuery) {
+            return Collections.singletonList(((ESToParentBlockJoinQuery) query).getChildQuery());
         } else {
             return null;
         }

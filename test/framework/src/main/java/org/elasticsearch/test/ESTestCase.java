@@ -77,6 +77,7 @@ import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.common.xcontent.json.JsonXContent;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.NodeEnvironment;
+import org.elasticsearch.env.TestEnvironment;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.analysis.AnalysisRegistry;
@@ -91,6 +92,7 @@ import org.elasticsearch.indices.IndicesService;
 import org.elasticsearch.indices.analysis.AnalysisModule;
 import org.elasticsearch.plugins.AnalysisPlugin;
 import org.elasticsearch.plugins.MapperPlugin;
+import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.plugins.ScriptPlugin;
 import org.elasticsearch.script.MockScriptEngine;
 import org.elasticsearch.script.Script;
@@ -102,6 +104,8 @@ import org.elasticsearch.search.MockSearchService;
 import org.elasticsearch.test.junit.listeners.LoggingListener;
 import org.elasticsearch.test.junit.listeners.ReproduceInfoPrinter;
 import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.transport.MockTcpTransportPlugin;
+import org.elasticsearch.transport.nio.MockNioTransportPlugin;
 import org.joda.time.DateTimeZone;
 import org.junit.After;
 import org.junit.AfterClass;
@@ -284,7 +288,7 @@ public abstract class ESTestCase extends LuceneTestCase {
 
     @After
     public final void after() throws Exception {
-        checkStaticState();
+        checkStaticState(false);
         // We check threadContext != null rather than enableWarningsCheck()
         // because after methods are still called in the event that before
         // methods failed, in which case threadContext might not have been
@@ -337,7 +341,7 @@ public abstract class ESTestCase extends LuceneTestCase {
             final Set<String> actualWarningValues =
                     actualWarnings.stream().map(DeprecationLogger::extractWarningValueFromWarningHeader).collect(Collectors.toSet());
             for (String msg : expectedWarnings) {
-                assertThat(actualWarningValues, hasItem(DeprecationLogger.escape(msg)));
+                assertThat(actualWarningValues, hasItem(DeprecationLogger.escapeAndEncode(msg)));
             }
             assertEquals("Expected " + expectedWarnings.length + " warnings but found " + actualWarnings.size() + "\nExpected: "
                     + Arrays.asList(expectedWarnings) + "\nActual: " + actualWarnings,
@@ -390,8 +394,10 @@ public abstract class ESTestCase extends LuceneTestCase {
     }
 
     // separate method so that this can be checked again after suite scoped cluster is shut down
-    protected static void checkStaticState() throws Exception {
-        MockPageCacheRecycler.ensureAllPagesAreReleased();
+    protected static void checkStaticState(boolean afterClass) throws Exception {
+        if (afterClass) {
+            MockPageCacheRecycler.ensureAllPagesAreReleased();
+        }
         MockBigArrays.ensureAllArraysAreReleased();
 
         // ensure no one changed the status logger level on us
@@ -456,6 +462,13 @@ public abstract class ESTestCase extends LuceneTestCase {
     }
 
     /**
+     * A random long number between min (inclusive) and max (inclusive).
+     */
+    public static long randomLongBetween(long min, long max) {
+        return RandomNumbers.randomLongBetween(random(), min, max);
+    }
+
+    /**
      * Returns a "scaled" number of iterations for loops which can have a variable
      * iteration count. This method is effectively
      * an alias to {@link #scaledRandomIntBetween(int, int)}.
@@ -496,12 +509,12 @@ public abstract class ESTestCase extends LuceneTestCase {
         return random().nextInt();
     }
 
+    /**
+     * @return a <code>long</code> between <code>0</code> and <code>Long.MAX_VALUE</code> (inclusive) chosen uniformly at random.
+     */
     public static long randomNonNegativeLong() {
-        long randomLong;
-        do {
-            randomLong = randomLong();
-        } while (randomLong == Long.MIN_VALUE);
-        return Math.abs(randomLong);
+        long randomLong = randomLong();
+        return randomLong == Long.MIN_VALUE ? 0 : Math.abs(randomLong);
     }
 
     public static float randomFloat() {
@@ -671,11 +684,7 @@ public abstract class ESTestCase extends LuceneTestCase {
      * helper to get a random value in a certain range that's different from the input
      */
     public static <T> T randomValueOtherThan(T input, Supplier<T> randomSupplier) {
-        if (input != null) {
-            return randomValueOtherThanMany(input::equals, randomSupplier);
-        }
-
-        return(randomSupplier.get());
+        return randomValueOtherThanMany(v -> Objects.equals(input, v), randomSupplier);
     }
 
     /**
@@ -762,8 +771,8 @@ public abstract class ESTestCase extends LuceneTestCase {
         return terminated;
     }
 
-    public static boolean terminate(ThreadPool service) throws InterruptedException {
-        return ThreadPool.terminate(service, 10, TimeUnit.SECONDS);
+    public static boolean terminate(ThreadPool threadPool) throws InterruptedException {
+        return ThreadPool.terminate(threadPool, 10, TimeUnit.SECONDS);
     }
 
     /**
@@ -807,8 +816,8 @@ public abstract class ESTestCase extends LuceneTestCase {
         Settings build = Settings.builder()
                 .put(settings)
                 .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toAbsolutePath())
-                .putArray(Environment.PATH_DATA_SETTING.getKey(), tmpPaths()).build();
-        return new NodeEnvironment(build, new Environment(build));
+                .putList(Environment.PATH_DATA_SETTING.getKey(), tmpPaths()).build();
+        return new NodeEnvironment(build, TestEnvironment.newEnvironment(build));
     }
 
     /** Return consistent index settings for the provided index version. */
@@ -881,6 +890,21 @@ public abstract class ESTestCase extends LuceneTestCase {
 
     public static String randomGeohash(int minPrecision, int maxPrecision) {
         return geohashGenerator.ofStringLength(random(), minPrecision, maxPrecision);
+    }
+
+    private static boolean useNio;
+
+    @BeforeClass
+    public static void setUseNio() throws Exception {
+        useNio = randomBoolean();
+    }
+
+    public static String getTestTransportType() {
+        return useNio ? MockNioTransportPlugin.MOCK_NIO_TRANSPORT_NAME : MockTcpTransportPlugin.MOCK_TCP_TRANSPORT_NAME;
+    }
+
+    public static Class<? extends Plugin> getTestTransportPlugin() {
+        return useNio ? MockNioTransportPlugin.class : MockTcpTransportPlugin.class;
     }
 
     private static final GeohashGenerator geohashGenerator = new GeohashGenerator();
@@ -1108,6 +1132,13 @@ public abstract class ESTestCase extends LuceneTestCase {
     }
 
     /**
+     * The {@link NamedWriteableRegistry} to use for this test. Subclasses should override and use liberally.
+     */
+    protected NamedWriteableRegistry writableRegistry() {
+        return new NamedWriteableRegistry(ClusterModule.getNamedWriteables());
+    }
+
+    /**
      * Create a "mock" script for use either with {@link MockScriptEngine} or anywhere where you need a script but don't really care about
      * its contents.
      */
@@ -1180,7 +1211,7 @@ public abstract class ESTestCase extends LuceneTestCase {
      */
     public static TestAnalysis createTestAnalysis(IndexSettings indexSettings, Settings nodeSettings,
                                                   AnalysisPlugin... analysisPlugins) throws IOException {
-        Environment env = new Environment(nodeSettings);
+        Environment env = TestEnvironment.newEnvironment(nodeSettings);
         AnalysisModule analysisModule = new AnalysisModule(env, Arrays.asList(analysisPlugins));
         AnalysisRegistry analysisRegistry = analysisModule.getAnalysisRegistry();
         return new TestAnalysis(analysisRegistry.build(indexSettings),

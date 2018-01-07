@@ -21,23 +21,31 @@ package org.elasticsearch.plugins;
 
 import org.elasticsearch.Version;
 import org.elasticsearch.bootstrap.JarHell;
+import org.elasticsearch.common.Booleans;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
-import org.elasticsearch.common.xcontent.ToXContent;
+import org.elasticsearch.common.xcontent.ToXContentObject;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * An in-memory representation of the plugin descriptor.
  */
-public class PluginInfo implements Writeable, ToXContent {
+public class PluginInfo implements Writeable, ToXContentObject {
 
     public static final String ES_PLUGIN_PROPERTIES = "plugin-descriptor.properties";
     public static final String ES_PLUGIN_POLICY = "plugin-security.policy";
@@ -46,7 +54,9 @@ public class PluginInfo implements Writeable, ToXContent {
     private final String description;
     private final String version;
     private final String classname;
+    private final List<String> extendedPlugins;
     private final boolean hasNativeController;
+    private final boolean requiresKeystore;
 
     /**
      * Construct plugin info.
@@ -55,19 +65,19 @@ public class PluginInfo implements Writeable, ToXContent {
      * @param description         a description of the plugin
      * @param version             the version of Elasticsearch the plugin is built for
      * @param classname           the entry point to the plugin
+     * @param extendedPlugins     other plugins this plugin extends through SPI
      * @param hasNativeController whether or not the plugin has a native controller
+     * @param requiresKeystore    whether or not the plugin requires the elasticsearch keystore to be created
      */
-    public PluginInfo(
-            final String name,
-            final String description,
-            final String version,
-            final String classname,
-            final boolean hasNativeController) {
+    public PluginInfo(String name, String description, String version, String classname,
+                      List<String> extendedPlugins, boolean hasNativeController, boolean requiresKeystore) {
         this.name = name;
         this.description = description;
         this.version = version;
         this.classname = classname;
+        this.extendedPlugins = Collections.unmodifiableList(extendedPlugins);
         this.hasNativeController = hasNativeController;
+        this.requiresKeystore = requiresKeystore;
     }
 
     /**
@@ -81,10 +91,20 @@ public class PluginInfo implements Writeable, ToXContent {
         this.description = in.readString();
         this.version = in.readString();
         this.classname = in.readString();
+        if (in.getVersion().onOrAfter(Version.V_6_2_0)) {
+            extendedPlugins = in.readList(StreamInput::readString);
+        } else {
+            extendedPlugins = Collections.emptyList();
+        }
         if (in.getVersion().onOrAfter(Version.V_5_4_0)) {
             hasNativeController = in.readBoolean();
         } else {
             hasNativeController = false;
+        }
+        if (in.getVersion().onOrAfter(Version.V_6_0_0_beta2)) {
+            requiresKeystore = in.readBoolean();
+        } else {
+            requiresKeystore = false;
         }
     }
 
@@ -94,8 +114,14 @@ public class PluginInfo implements Writeable, ToXContent {
         out.writeString(description);
         out.writeString(version);
         out.writeString(classname);
+        if (out.getVersion().onOrAfter(Version.V_6_2_0)) {
+            out.writeStringList(extendedPlugins);
+        }
         if (out.getVersion().onOrAfter(Version.V_5_4_0)) {
             out.writeBoolean(hasNativeController);
+        }
+        if (out.getVersion().onOrAfter(Version.V_6_0_0_beta2)) {
+            out.writeBoolean(requiresKeystore);
         }
     }
 
@@ -110,27 +136,33 @@ public class PluginInfo implements Writeable, ToXContent {
      */
     public static PluginInfo readFromProperties(final Path path) throws IOException {
         final Path descriptor = path.resolve(ES_PLUGIN_PROPERTIES);
-        final Properties props = new Properties();
-        try (InputStream stream = Files.newInputStream(descriptor)) {
-            props.load(stream);
+
+        final Map<String, String> propsMap;
+        {
+            final Properties props = new Properties();
+            try (InputStream stream = Files.newInputStream(descriptor)) {
+                props.load(stream);
+            }
+            propsMap = props.stringPropertyNames().stream().collect(Collectors.toMap(Function.identity(), props::getProperty));
         }
-        final String name = props.getProperty("name");
+
+        final String name = propsMap.remove("name");
         if (name == null || name.isEmpty()) {
             throw new IllegalArgumentException(
                     "property [name] is missing in [" + descriptor + "]");
         }
-        final String description = props.getProperty("description");
+        final String description = propsMap.remove("description");
         if (description == null) {
             throw new IllegalArgumentException(
                     "property [description] is missing for plugin [" + name + "]");
         }
-        final String version = props.getProperty("version");
+        final String version = propsMap.remove("version");
         if (version == null) {
             throw new IllegalArgumentException(
                     "property [version] is missing for plugin [" + name + "]");
         }
 
-        final String esVersionString = props.getProperty("elasticsearch.version");
+        final String esVersionString = propsMap.remove("elasticsearch.version");
         if (esVersionString == null) {
             throw new IllegalArgumentException(
                     "property [elasticsearch.version] is missing for plugin [" + name + "]");
@@ -145,20 +177,28 @@ public class PluginInfo implements Writeable, ToXContent {
                     esVersionString);
             throw new IllegalArgumentException(message);
         }
-        final String javaVersionString = props.getProperty("java.version");
+        final String javaVersionString = propsMap.remove("java.version");
         if (javaVersionString == null) {
             throw new IllegalArgumentException(
                     "property [java.version] is missing for plugin [" + name + "]");
         }
         JarHell.checkVersionFormat(javaVersionString);
         JarHell.checkJavaVersion(name, javaVersionString);
-        final String classname = props.getProperty("classname");
+        final String classname = propsMap.remove("classname");
         if (classname == null) {
             throw new IllegalArgumentException(
                     "property [classname] is missing for plugin [" + name + "]");
         }
 
-        final String hasNativeControllerValue = props.getProperty("has.native.controller");
+        final String extendedString = propsMap.remove("extended.plugins");
+        final List<String> extendedPlugins;
+        if (extendedString == null) {
+            extendedPlugins = Collections.emptyList();
+        } else {
+            extendedPlugins = Arrays.asList(Strings.delimitedListToStringArray(extendedString, ","));
+        }
+
+        final String hasNativeControllerValue = propsMap.remove("has.native.controller");
         final boolean hasNativeController;
         if (hasNativeControllerValue == null) {
             hasNativeController = false;
@@ -172,17 +212,33 @@ public class PluginInfo implements Writeable, ToXContent {
                     break;
                 default:
                     final String message = String.format(
-                            Locale.ROOT,
-                            "property [%s] must be [%s], [%s], or unspecified but was [%s]",
-                            "has_native_controller",
-                            "true",
-                            "false",
-                            hasNativeControllerValue);
+                        Locale.ROOT,
+                        "property [%s] must be [%s], [%s], or unspecified but was [%s]",
+                        "has_native_controller",
+                        "true",
+                        "false",
+                        hasNativeControllerValue);
                     throw new IllegalArgumentException(message);
             }
         }
 
-        return new PluginInfo(name, description, version, classname, hasNativeController);
+        String requiresKeystoreValue = propsMap.remove("requires.keystore");
+        if (requiresKeystoreValue == null) {
+            requiresKeystoreValue = "false";
+        }
+        final boolean requiresKeystore;
+        try {
+            requiresKeystore = Booleans.parseBoolean(requiresKeystoreValue);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("property [requires.keystore] must be [true] or [false]," +
+                                               " but was [" + requiresKeystoreValue + "]", e);
+        }
+
+        if (propsMap.isEmpty() == false) {
+            throw new IllegalArgumentException("Unknown properties in plugin descriptor: " + propsMap.keySet());
+        }
+
+        return new PluginInfo(name, description, version, classname, extendedPlugins, hasNativeController, requiresKeystore);
     }
 
     /**
@@ -213,6 +269,15 @@ public class PluginInfo implements Writeable, ToXContent {
     }
 
     /**
+     * Other plugins this plugin extends through SPI.
+     *
+     * @return the names of the plugins extended
+     */
+    public List<String> getExtendedPlugins() {
+        return extendedPlugins;
+    }
+
+    /**
      * The version of Elasticsearch the plugin was built for.
      *
      * @return the version
@@ -230,6 +295,15 @@ public class PluginInfo implements Writeable, ToXContent {
         return hasNativeController;
     }
 
+    /**
+     * Whether or not the plugin requires the elasticsearch keystore to exist.
+     *
+     * @return {@code true} if the plugin requires a keystore, {@code false} otherwise
+     */
+    public boolean requiresKeystore() {
+        return requiresKeystore;
+    }
+
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject();
@@ -238,7 +312,9 @@ public class PluginInfo implements Writeable, ToXContent {
             builder.field("version", version);
             builder.field("description", description);
             builder.field("classname", classname);
+            builder.field("extended_plugins", extendedPlugins);
             builder.field("has_native_controller", hasNativeController);
+            builder.field("requires_keystore", requiresKeystore);
         }
         builder.endObject();
 
@@ -271,6 +347,8 @@ public class PluginInfo implements Writeable, ToXContent {
                 .append("Description: ").append(description).append("\n")
                 .append("Version: ").append(version).append("\n")
                 .append("Native Controller: ").append(hasNativeController).append("\n")
+                .append("Requires Keystore: ").append(requiresKeystore).append("\n")
+                .append("Extended Plugins: ").append(extendedPlugins).append("\n")
                 .append(" * Classname: ").append(classname);
         return information.toString();
     }

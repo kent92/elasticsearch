@@ -18,11 +18,12 @@
  */
 package org.elasticsearch.search.aggregations;
 
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.io.stream.NamedWriteable;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
+import org.elasticsearch.common.util.BigArray;
 import org.elasticsearch.common.util.BigArrays;
-import org.elasticsearch.common.xcontent.ToXContent;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.rest.action.search.RestSearchAction;
 import org.elasticsearch.script.ScriptService;
@@ -33,21 +34,28 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.IntConsumer;
 
 /**
  * An internal implementation of {@link Aggregation}. Serves as a base class for all aggregation implementations.
  */
-public abstract class InternalAggregation implements Aggregation, ToXContent, NamedWriteable {
+public abstract class InternalAggregation implements Aggregation, NamedWriteable {
 
     public static class ReduceContext {
 
         private final BigArrays bigArrays;
         private final ScriptService scriptService;
+        private final IntConsumer multiBucketConsumer;
         private final boolean isFinalReduce;
 
         public ReduceContext(BigArrays bigArrays, ScriptService scriptService, boolean isFinalReduce) {
+            this(bigArrays, scriptService, (s) -> {}, isFinalReduce);
+        }
+
+        public ReduceContext(BigArrays bigArrays, ScriptService scriptService, IntConsumer multiBucketConsumer, boolean isFinalReduce) {
             this.bigArrays = bigArrays;
             this.scriptService = scriptService;
+            this.multiBucketConsumer = multiBucketConsumer;
             this.isFinalReduce = isFinalReduce;
         }
 
@@ -66,6 +74,14 @@ public abstract class InternalAggregation implements Aggregation, ToXContent, Na
 
         public ScriptService scriptService() {
             return scriptService;
+        }
+
+        /**
+         * Adds <tt>count</tt> buckets to the global count for the request and fails if this number is greater than
+         * the maximum number of buckets allowed in a response
+         */
+        public void consumeBucketsAndMaybeBreak(int size) {
+            multiBucketConsumer.accept(size);
         }
     }
 
@@ -202,9 +218,7 @@ public abstract class InternalAggregation implements Aggregation, ToXContent, Na
      * Opportunity for subclasses to the {@link #hashCode()} for this
      * class.
      **/
-    protected int doHashCode() {
-        return System.identityHashCode(this);
-    }
+    protected abstract int doHashCode();
 
     @Override
     public boolean equals(Object obj) {
@@ -221,7 +235,6 @@ public abstract class InternalAggregation implements Aggregation, ToXContent, Na
                 doEquals(obj);
     }
 
-    // norelease: make this abstract when all InternalAggregations implement this method
     /**
      * Opportunity for subclasses to add criteria to the {@link #equals(Object)}
      * method for this class.
@@ -230,8 +243,11 @@ public abstract class InternalAggregation implements Aggregation, ToXContent, Na
      * {@link #equals(Object)} method checks that <code>obj</code> is the same
      * class as <code>this</code>
      */
-    protected boolean doEquals(Object obj) {
-        return this == obj;
+    protected abstract boolean doEquals(Object obj);
+
+    @Override
+    public String toString() {
+        return Strings.toString(this);
     }
 
 }

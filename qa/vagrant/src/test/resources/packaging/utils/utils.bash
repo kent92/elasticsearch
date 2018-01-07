@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This file contains some utilities to test the the .deb/.rpm
+# This file contains some utilities to test the .deb/.rpm
 # packages and the SysV/Systemd scripts.
 
 # WARNING: This testing file must be executed as root and can
@@ -139,6 +139,11 @@ skip_not_zip() {
 
 assert_file_exist() {
     local file="$1"
+    local count=$(echo "$file" | wc -l)
+    [[ "$count" == "1" ]] || {
+      echo "assert_file_exist must be run on a single file at a time but was called on [$count] files: $file"
+      false
+    }
     if [ ! -e "$file" ]; then
         echo "Should exist: ${file} but does not"
     fi
@@ -335,12 +340,12 @@ start_elasticsearch_service() {
 run_elasticsearch_service() {
     local expectedStatus=$1
     local commandLineArgs=$2
-    # Set the CONF_DIR setting in case we start as a service
-    if [ ! -z "$CONF_DIR" ] ; then
+    # Set the ES_PATH_CONF setting in case we start as a service
+    if [ ! -z "$ES_PATH_CONF" ] ; then
         if is_dpkg; then
-            echo "CONF_DIR=$CONF_DIR" >> /etc/default/elasticsearch;
+            echo "ES_PATH_CONF=$ES_PATH_CONF" >> /etc/default/elasticsearch;
         elif is_rpm; then
-            echo "CONF_DIR=$CONF_DIR" >> /etc/sysconfig/elasticsearch;
+            echo "ES_PATH_CONF=$ES_PATH_CONF" >> /etc/sysconfig/elasticsearch;
         fi
     fi
 
@@ -362,7 +367,7 @@ run_elasticsearch_service() {
 # This line is attempting to emulate the on login behavior of /usr/share/upstart/sessions/jayatana.conf
 [ -f /usr/share/java/jayatanaag.jar ] && export JAVA_TOOL_OPTIONS="-javaagent:/usr/share/java/jayatanaag.jar"
 # And now we can start Elasticsearch normally, in the background (-d) and with a pidfile (-p).
-export CONF_DIR=$CONF_DIR
+export ES_PATH_CONF=$ES_PATH_CONF
 export ES_JAVA_OPTS=$ES_JAVA_OPTS
 $timeoutCommand/tmp/elasticsearch/bin/elasticsearch $background -p /tmp/elasticsearch/elasticsearch.pid $commandLineArgs
 BASH
@@ -417,7 +422,7 @@ wait_for_elasticsearch_status() {
     local index=$2
 
     echo "Making sure elasticsearch is up..."
-    wget -O - --retry-connrefused --waitretry=1 --timeout=60 --tries 60 http://localhost:9200/_cluster/health || {
+    wget -O - --retry-connrefused --waitretry=1 --timeout=120 --tries 120 http://localhost:9200/_cluster/health || {
           echo "Looks like elasticsearch never started. Here is its log:"
           if [ -e "$ESLOG/elasticsearch.log" ]; then
               cat "$ESLOG/elasticsearch.log"

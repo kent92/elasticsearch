@@ -56,7 +56,7 @@ public class DoubleRandomBinaryDocValuesRangeQueryTests extends BaseRandomBinary
         }
     }
 
-    private static class DoubleTestRange extends AbstractRange {
+    private static class DoubleTestRange extends AbstractRange<Double> {
         double min;
         double max;
 
@@ -66,7 +66,7 @@ public class DoubleRandomBinaryDocValuesRangeQueryTests extends BaseRandomBinary
         }
 
         @Override
-        public Object getMin() {
+        public Double getMin() {
             return min;
         }
 
@@ -82,7 +82,7 @@ public class DoubleRandomBinaryDocValuesRangeQueryTests extends BaseRandomBinary
         }
 
         @Override
-        public Object getMax() {
+        public Double getMax() {
             return max;
         }
 

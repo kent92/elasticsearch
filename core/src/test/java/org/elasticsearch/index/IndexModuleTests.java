@@ -39,9 +39,11 @@ import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.BigArrays;
+import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.NodeEnvironment;
 import org.elasticsearch.env.ShardLock;
+import org.elasticsearch.env.TestEnvironment;
 import org.elasticsearch.index.analysis.AnalysisRegistry;
 import org.elasticsearch.index.cache.query.DisabledQueryCache;
 import org.elasticsearch.index.cache.query.IndexQueryCache;
@@ -118,12 +120,13 @@ public class IndexModuleTests extends ESTestCase {
         indicesQueryCache = new IndicesQueryCache(settings);
         indexSettings = IndexSettingsModule.newIndexSettings("foo", settings);
         index = indexSettings.getIndex();
-        environment = new Environment(settings);
+        environment = TestEnvironment.newEnvironment(settings);
         emptyAnalysisRegistry = new AnalysisRegistry(environment, emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap(),
                 emptyMap(), emptyMap(), emptyMap());
         threadPool = new TestThreadPool("test");
         circuitBreakerService = new NoneCircuitBreakerService();
-        bigArrays = new BigArrays(settings, circuitBreakerService);
+        PageCacheRecycler pageCacheRecycler = new PageCacheRecycler(settings);
+        bigArrays = new BigArrays(pageCacheRecycler, circuitBreakerService);
         scriptService = new ScriptService(settings, Collections.emptyMap(), Collections.emptyMap());
         clusterService = ClusterServiceUtils.createClusterService(threadPool);
         nodeEnvironment = new NodeEnvironment(settings, environment);
@@ -140,7 +143,7 @@ public class IndexModuleTests extends ESTestCase {
     private IndexService newIndexService(IndexModule module) throws IOException {
         return module.newIndexService(nodeEnvironment, xContentRegistry(), deleter, circuitBreakerService, bigArrays, threadPool,
                 scriptService, null, indicesQueryCache, mapperRegistry,
-                new IndicesFieldDataCache(settings, listener));
+                new IndicesFieldDataCache(settings, listener), writableRegistry());
     }
 
     public void testWrapperIsBound() throws IOException {
@@ -191,7 +194,7 @@ public class IndexModuleTests extends ESTestCase {
         module.addIndexEventListener(eventListener);
         IndexService indexService = newIndexService(module);
         IndexSettings x = indexService.getIndexSettings();
-        assertEquals(x.getSettings().getAsMap(), indexSettings.getSettings().getAsMap());
+        assertEquals(x.getSettings(), indexSettings.getSettings());
         assertEquals(x.getIndex(), index);
         indexService.getIndexEventListener().beforeIndexRemoved(null, null);
         assertTrue(atomicBoolean.get());
@@ -284,7 +287,7 @@ public class IndexModuleTests extends ESTestCase {
                 .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
                 .build();
         IndexModule module = new IndexModule(IndexSettingsModule.newIndexSettings("foo", indexSettings), emptyAnalysisRegistry);
-        module.addSimilarity("test_similarity", (string, providerSettings, indexLevelSettings) -> new SimilarityProvider() {
+        module.addSimilarity("test_similarity", (string, providerSettings, indexLevelSettings, scriptService) -> new SimilarityProvider() {
             @Override
             public String name() {
                 return string;

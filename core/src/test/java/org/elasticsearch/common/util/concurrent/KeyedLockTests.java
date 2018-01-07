@@ -24,6 +24,9 @@ import org.elasticsearch.common.util.concurrent.KeyedLock;
 import org.elasticsearch.test.ESTestCase;
 import org.hamcrest.Matchers;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,7 +40,7 @@ public class KeyedLockTests extends ESTestCase {
     public void testIfMapEmptyAfterLotsOfAcquireAndReleases() throws InterruptedException {
         ConcurrentHashMap<String, Integer> counter = new ConcurrentHashMap<>();
         ConcurrentHashMap<String, AtomicInteger> safeCounter = new ConcurrentHashMap<>();
-        KeyedLock<String> connectionLock = new KeyedLock<String>(randomBoolean());
+        KeyedLock<String> connectionLock = new KeyedLock<>(randomBoolean());
         String[] names = new String[randomIntBetween(1, 40)];
         for (int i = 0; i < names.length; i++) {
             names[i] = randomRealisticUnicodeOfLengthBetween(10, 20);
@@ -65,6 +68,45 @@ public class KeyedLockTests extends ESTestCase {
             assertThat(atomicInteger, not(Matchers.nullValue()));
             assertThat(atomicInteger.get(), equalTo(entry.getValue()));
         }
+    }
+
+    public void testHasLockedKeys() {
+        KeyedLock<String> lock = new KeyedLock<>();
+        assertFalse(lock.hasLockedKeys());
+        Releasable foo = lock.acquire("foo");
+        assertTrue(lock.hasLockedKeys());
+        foo.close();
+        assertFalse(lock.hasLockedKeys());
+    }
+
+    public void testLockIsReentrant() throws InterruptedException {
+        KeyedLock<String> lock = new KeyedLock<>();
+        Releasable foo = lock.acquire("foo");
+        assertTrue(lock.isHeldByCurrentThread("foo"));
+        assertFalse(lock.isHeldByCurrentThread("bar"));
+        Releasable foo2 = lock.acquire("foo");
+        AtomicInteger test = new AtomicInteger(0);
+        CountDownLatch latch = new CountDownLatch(1);
+        Thread t = new Thread(() -> {
+            latch.countDown();
+            try (Releasable r = lock.acquire("foo")) {
+                test.incrementAndGet();
+            }
+
+        });
+        t.start();
+        latch.await();
+        Thread.yield();
+        assertEquals(0, test.get());
+        List<Releasable> list = Arrays.asList(foo, foo2);
+        Collections.shuffle(list, random());
+        list.get(0).close();
+        Thread.yield();
+        assertEquals(0, test.get());
+        list.get(1).close();
+        t.join();
+        assertEquals(1, test.get());
+        assertFalse(lock.hasLockedKeys());
     }
 
 
@@ -98,6 +140,12 @@ public class KeyedLockTests extends ESTestCase {
                 try (Releasable ignored = connectionLock.acquire(curName)) {
                     assert connectionLock.isHeldByCurrentThread(curName);
                     assert connectionLock.isHeldByCurrentThread(curName + "bla") == false;
+                    if (randomBoolean()) {
+                        try (Releasable reentrantIgnored = connectionLock.acquire(curName)) {
+                            // just acquire this and make sure we can :)
+                            Thread.yield();
+                        }
+                    }
                     Integer integer = counter.get(curName);
                     if (integer == null) {
                         counter.put(curName, 1);

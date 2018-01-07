@@ -16,6 +16,7 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+
 package org.elasticsearch.index.mapper;
 
 import com.carrotsearch.randomizedtesting.generators.RandomPicks;
@@ -82,7 +83,7 @@ public class RangeFieldTypeTests extends FieldTypeTestCase {
             .put(IndexMetaData.SETTING_VERSION_CREATED, Version.CURRENT).build();
         IndexSettings idxSettings = IndexSettingsModule.newIndexSettings(randomAlphaOfLengthBetween(1, 10), indexSettings);
         QueryShardContext context = new QueryShardContext(0, idxSettings, null, null, null, null, null, xContentRegistry(),
-                null, null, () -> nowInMillis);
+            writableRegistry(), null, null, () -> nowInMillis, null);
         RangeFieldMapper.RangeFieldType ft = new RangeFieldMapper.RangeFieldType(type, Version.CURRENT);
         ft.setName(FIELDNAME);
         ft.setIndexOptions(IndexOptions.DOCS);
@@ -94,7 +95,7 @@ public class RangeFieldTypeTests extends FieldTypeTestCase {
         Object to = nextTo(from);
 
         assertEquals(getExpectedRangeQuery(relation, from, to, includeLower, includeUpper),
-            ft.rangeQuery(from, to, includeLower, includeUpper, relation, context));
+            ft.rangeQuery(from, to, includeLower, includeUpper, relation, null, null, context));
     }
 
     private Query getExpectedRangeQuery(ShapeRelation relation, Object from, Object to, boolean includeLower, boolean includeUpper) {
@@ -274,5 +275,24 @@ public class RangeFieldTypeTests extends FieldTypeTestCase {
         assertEquals(InetAddresses.forString("::1"), RangeFieldMapper.RangeType.IP.parse(InetAddresses.forString("::1"), randomBoolean()));
         assertEquals(InetAddresses.forString("::1"), RangeFieldMapper.RangeType.IP.parse("::1", randomBoolean()));
         assertEquals(InetAddresses.forString("::1"), RangeFieldMapper.RangeType.IP.parse(new BytesRef("::1"), randomBoolean()));
+    }
+
+    public void testTermQuery() throws Exception, IllegalArgumentException {
+        // See https://github.com/elastic/elasticsearch/issues/25950
+        Settings indexSettings = Settings.builder()
+            .put(IndexMetaData.SETTING_VERSION_CREATED, Version.CURRENT).build();
+        IndexSettings idxSettings = IndexSettingsModule.newIndexSettings(randomAlphaOfLengthBetween(1, 10), indexSettings);
+        QueryShardContext context = new QueryShardContext(0, idxSettings, null, null, null, null, null, xContentRegistry(),
+            writableRegistry(), null, null, () -> nowInMillis, null);
+        RangeFieldMapper.RangeFieldType ft = new RangeFieldMapper.RangeFieldType(type, Version.CURRENT);
+        ft.setName(FIELDNAME);
+        ft.setIndexOptions(IndexOptions.DOCS);
+
+        Object value = nextFrom();
+        ShapeRelation relation = ShapeRelation.INTERSECTS;
+        boolean includeLower = true;
+        boolean includeUpper = true;
+        assertEquals(getExpectedRangeQuery(relation, value, value, includeLower, includeUpper),
+            ft.termQuery(value, context));
     }
 }

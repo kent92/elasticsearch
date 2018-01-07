@@ -22,6 +22,7 @@ import org.elasticsearch.Version;
 import org.elasticsearch.common.settings.IndexScopedSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.indices.mapper.MapperRegistry;
+import org.elasticsearch.plugins.MapperPlugin;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.test.VersionUtils;
 
@@ -31,8 +32,8 @@ public class MetaDataIndexUpgradeServiceTests extends ESTestCase {
 
     public void testArchiveBrokenIndexSettings() {
         MetaDataIndexUpgradeService service = new MetaDataIndexUpgradeService(Settings.EMPTY, xContentRegistry(),
-            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap()), IndexScopedSettings.DEFAULT_SCOPED_SETTINGS,
-            Collections.emptyList());
+            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap(), MapperPlugin.NOOP_FIELD_FILTER),
+                IndexScopedSettings.DEFAULT_SCOPED_SETTINGS, Collections.emptyList());
         IndexMetaData src = newIndexMeta("foo", Settings.EMPTY);
         IndexMetaData indexMetaData = service.archiveBrokenIndexSettings(src);
         assertSame(indexMetaData, src);
@@ -59,8 +60,8 @@ public class MetaDataIndexUpgradeServiceTests extends ESTestCase {
 
     public void testUpgrade() {
         MetaDataIndexUpgradeService service = new MetaDataIndexUpgradeService(Settings.EMPTY, xContentRegistry(),
-            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap()), IndexScopedSettings.DEFAULT_SCOPED_SETTINGS,
-            Collections.emptyList());
+            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap(), MapperPlugin.NOOP_FIELD_FILTER),
+                IndexScopedSettings.DEFAULT_SCOPED_SETTINGS, Collections.emptyList());
         IndexMetaData src = newIndexMeta("foo", Settings.builder().put("index.refresh_interval", "-200").build());
         assertFalse(service.isUpgraded(src));
         src = service.upgradeIndexMetaData(src, Version.CURRENT.minimumIndexCompatibilityVersion());
@@ -72,8 +73,8 @@ public class MetaDataIndexUpgradeServiceTests extends ESTestCase {
 
     public void testIsUpgraded() {
         MetaDataIndexUpgradeService service = new MetaDataIndexUpgradeService(Settings.EMPTY, xContentRegistry(),
-            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap()), IndexScopedSettings.DEFAULT_SCOPED_SETTINGS,
-            Collections.emptyList());
+            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap(), MapperPlugin.NOOP_FIELD_FILTER),
+                IndexScopedSettings.DEFAULT_SCOPED_SETTINGS, Collections.emptyList());
         IndexMetaData src = newIndexMeta("foo", Settings.builder().put("index.refresh_interval", "-200").build());
         assertFalse(service.isUpgraded(src));
         Version version = VersionUtils.randomVersionBetween(random(), VersionUtils.getFirstVersion(), VersionUtils.getPreviousVersion());
@@ -85,34 +86,39 @@ public class MetaDataIndexUpgradeServiceTests extends ESTestCase {
 
     public void testFailUpgrade() {
         MetaDataIndexUpgradeService service = new MetaDataIndexUpgradeService(Settings.EMPTY, xContentRegistry(),
-            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap()), IndexScopedSettings.DEFAULT_SCOPED_SETTINGS,
-            Collections.emptyList());
+            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap(), MapperPlugin.NOOP_FIELD_FILTER),
+                IndexScopedSettings.DEFAULT_SCOPED_SETTINGS, Collections.emptyList());
+        Version minCompat = Version.CURRENT.minimumIndexCompatibilityVersion();
+        Version indexUpgraded = VersionUtils.randomVersionBetween(random(), minCompat, VersionUtils.getPreviousVersion(Version.CURRENT));
+        Version indexCreated = Version.fromString((minCompat.major - 1) + "." + randomInt(5) + "." + randomInt(5));
         final IndexMetaData metaData = newIndexMeta("foo", Settings.builder()
-            .put(IndexMetaData.SETTING_VERSION_UPGRADED, Version.V_5_0_0_beta1)
-            .put(IndexMetaData.SETTING_VERSION_CREATED, Version.fromString("2.4.0"))
+            .put(IndexMetaData.SETTING_VERSION_UPGRADED, indexUpgraded)
+            .put(IndexMetaData.SETTING_VERSION_CREATED, indexCreated)
             .build());
         String message = expectThrows(IllegalStateException.class, () -> service.upgradeIndexMetaData(metaData,
             Version.CURRENT.minimumIndexCompatibilityVersion())).getMessage();
-        assertEquals(message, "The index [[foo/BOOM]] was created with version [2.4.0] but the minimum compatible version is [5.0.0]." +
-            " It should be re-indexed in Elasticsearch 5.x before upgrading to " + Version.CURRENT.toString() + ".");
+        assertEquals(message, "The index [[foo/BOOM]] was created with version [" + indexCreated + "] " +
+             "but the minimum compatible version is [" + minCompat + "]." +
+            " It should be re-indexed in Elasticsearch " + minCompat.major + ".x before upgrading to " + Version.CURRENT.toString() + ".");
 
+        indexCreated = VersionUtils.randomVersionBetween(random(), minCompat, Version.CURRENT);
+        indexUpgraded = VersionUtils.randomVersionBetween(random(), indexCreated, Version.CURRENT);
         IndexMetaData goodMeta = newIndexMeta("foo", Settings.builder()
-            .put(IndexMetaData.SETTING_VERSION_UPGRADED, Version.V_5_0_0_beta1)
-            .put(IndexMetaData.SETTING_VERSION_CREATED, Version.fromString("5.1.0"))
+            .put(IndexMetaData.SETTING_VERSION_UPGRADED, indexUpgraded)
+            .put(IndexMetaData.SETTING_VERSION_CREATED, indexCreated)
             .build());
-        service.upgradeIndexMetaData(goodMeta, Version.V_5_0_0.minimumIndexCompatibilityVersion());
+        service.upgradeIndexMetaData(goodMeta, Version.CURRENT.minimumIndexCompatibilityVersion());
     }
 
     public void testPluginUpgrade() {
         MetaDataIndexUpgradeService service = new MetaDataIndexUpgradeService(Settings.EMPTY, xContentRegistry(),
-            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap()), IndexScopedSettings.DEFAULT_SCOPED_SETTINGS,
-            Collections.singletonList(
-                indexMetaData -> IndexMetaData.builder(indexMetaData)
-                    .settings(
-                        Settings.builder()
-                            .put(indexMetaData.getSettings())
-                            .put("index.refresh_interval", "10s")
-                    ).build()));
+            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap(), MapperPlugin.NOOP_FIELD_FILTER),
+                IndexScopedSettings.DEFAULT_SCOPED_SETTINGS, Collections.singletonList(
+                        indexMetaData -> IndexMetaData.builder(indexMetaData).settings(
+                            Settings.builder()
+                                .put(indexMetaData.getSettings())
+                                .put("index.refresh_interval", "10s")
+                        ).build()));
         IndexMetaData src = newIndexMeta("foo", Settings.builder().put("index.refresh_interval", "200s").build());
         assertFalse(service.isUpgraded(src));
         src = service.upgradeIndexMetaData(src, Version.CURRENT.minimumIndexCompatibilityVersion());
@@ -123,12 +129,12 @@ public class MetaDataIndexUpgradeServiceTests extends ESTestCase {
 
     public void testPluginUpgradeFailure() {
         MetaDataIndexUpgradeService service = new MetaDataIndexUpgradeService(Settings.EMPTY, xContentRegistry(),
-            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap()), IndexScopedSettings.DEFAULT_SCOPED_SETTINGS,
-            Collections.singletonList(
-                indexMetaData -> {
-                    throw new IllegalStateException("Cannot upgrade index " + indexMetaData.getIndex().getName());
-                }
-            ));
+            new MapperRegistry(Collections.emptyMap(), Collections.emptyMap(), MapperPlugin.NOOP_FIELD_FILTER),
+                IndexScopedSettings.DEFAULT_SCOPED_SETTINGS, Collections.singletonList(
+                    indexMetaData -> {
+                        throw new IllegalStateException("Cannot upgrade index " + indexMetaData.getIndex().getName());
+                    }
+                ));
         IndexMetaData src = newIndexMeta("foo", Settings.EMPTY);
         String message = expectThrows(IllegalStateException.class, () -> service.upgradeIndexMetaData(src,
             Version.CURRENT.minimumIndexCompatibilityVersion())).getMessage();
@@ -144,7 +150,6 @@ public class MetaDataIndexUpgradeServiceTests extends ESTestCase {
             .put(IndexMetaData.SETTING_VERSION_UPGRADED, Version.V_5_0_0_beta1)
             .put(indexSettings)
             .build();
-        IndexMetaData metaData = IndexMetaData.builder(name).settings(build).build();
-        return metaData;
+        return IndexMetaData.builder(name).settings(build).build();
     }
 }

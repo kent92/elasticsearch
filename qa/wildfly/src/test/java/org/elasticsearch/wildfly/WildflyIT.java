@@ -19,13 +19,13 @@
 
 package org.elasticsearch.wildfly;
 
-import org.elasticsearch.client.http.client.methods.CloseableHttpResponse;
-import org.elasticsearch.client.http.client.methods.HttpGet;
-import org.elasticsearch.client.http.client.methods.HttpPut;
-import org.elasticsearch.client.http.entity.ContentType;
-import org.elasticsearch.client.http.entity.StringEntity;
-import org.elasticsearch.client.http.impl.client.CloseableHttpClient;
-import org.elasticsearch.client.http.impl.client.HttpClientBuilder;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.client.methods.HttpPut;
+import org.apache.http.entity.ContentType;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.lucene.util.LuceneTestCase;
 import org.elasticsearch.Build;
 import org.elasticsearch.Version;
@@ -53,7 +53,8 @@ public class WildflyIT extends LuceneTestCase {
         try (CloseableHttpClient client = HttpClientBuilder.create().build()) {
             final String str = String.format(
                     Locale.ROOT,
-                    "http://localhost:38080/wildfly-%s%s/transport/employees/1",
+                    "http://localhost:%d/wildfly-%s%s/transport/employees/1",
+                    Integer.parseInt(System.getProperty("tests.jboss.http.port")),
                     Version.CURRENT,
                     Build.CURRENT.isSnapshot() ? "-SNAPSHOT" : "");
             final HttpPut put = new HttpPut(new URI(str));

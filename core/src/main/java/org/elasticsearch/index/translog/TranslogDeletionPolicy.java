@@ -20,16 +20,30 @@
 package org.elasticsearch.index.translog;
 
 import org.apache.lucene.util.Counter;
+import org.elasticsearch.Assertions;
+import org.elasticsearch.common.lease.Releasable;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class TranslogDeletionPolicy {
 
+    private final Map<Object, RuntimeException> openTranslogRef;
+
+    public void assertNoOpenTranslogRefs() {
+        if (openTranslogRef.isEmpty() == false) {
+            AssertionError e = new AssertionError("not all translog generations have been released");
+            openTranslogRef.values().forEach(e::addSuppressed);
+            throw e;
+        }
+    }
+
     /**
-     * Records how many views are held against each
+     * Records how many retention locks are held against each
      * translog generation
      */
     private final Map<Long, Counter> translogRefCounts = new HashMap<>();
@@ -40,6 +54,11 @@ public class TranslogDeletionPolicy {
      */
     private long minTranslogGenerationForRecovery = 1;
 
+    /**
+     * This translog generation is used to calculate the number of uncommitted operations since the last index commit.
+     */
+    private long translogGenerationOfLastCommit = 1;
+
     private long retentionSizeInBytes;
 
     private long retentionAgeInMillis;
@@ -47,14 +66,30 @@ public class TranslogDeletionPolicy {
     public TranslogDeletionPolicy(long retentionSizeInBytes, long retentionAgeInMillis) {
         this.retentionSizeInBytes = retentionSizeInBytes;
         this.retentionAgeInMillis = retentionAgeInMillis;
+        if (Assertions.ENABLED) {
+            openTranslogRef = new ConcurrentHashMap<>();
+        } else {
+            openTranslogRef = null;
+        }
     }
 
     public synchronized void setMinTranslogGenerationForRecovery(long newGen) {
-        if (newGen < minTranslogGenerationForRecovery) {
-            throw new IllegalArgumentException("minTranslogGenerationForRecovery can't go backwards. new [" + newGen + "] current [" +
-                minTranslogGenerationForRecovery + "]");
+        if (newGen < minTranslogGenerationForRecovery || newGen > translogGenerationOfLastCommit) {
+            throw new IllegalArgumentException("Invalid minTranslogGenerationForRecovery can't go backwards; new [" + newGen + "]," +
+                "current [" + minTranslogGenerationForRecovery + "], lastGen [" + translogGenerationOfLastCommit + "]");
         }
         minTranslogGenerationForRecovery = newGen;
+    }
+
+    /**
+     * Sets the translog generation of the last index commit.
+     */
+    public synchronized void setTranslogGenerationOfLastCommit(long lastGen) {
+        if (lastGen < translogGenerationOfLastCommit || lastGen < minTranslogGenerationForRecovery) {
+            throw new IllegalArgumentException("Invalid translogGenerationOfLastCommit; new [" + lastGen + "]," +
+                "current [" + translogGenerationOfLastCommit + "], minRequiredGen [" + minTranslogGenerationForRecovery + "]");
+        }
+        translogGenerationOfLastCommit = lastGen;
     }
 
     public synchronized void setRetentionSizeInBytes(long bytes) {
@@ -66,22 +101,42 @@ public class TranslogDeletionPolicy {
     }
 
     /**
-     * acquires the basis generation for a new view. Any translog generation above, and including, the returned generation
-     * will not be deleted until a corresponding call to {@link #releaseTranslogGenView(long)} is called.
+     * acquires the basis generation for a new snapshot. Any translog generation above, and including, the returned generation
+     * will not be deleted until the returned {@link Releasable} is closed.
      */
-    synchronized void acquireTranslogGenForView(final long genForView) {
-        translogRefCounts.computeIfAbsent(genForView, l -> Counter.newCounter(false)).addAndGet(1);
+    synchronized Releasable acquireTranslogGen(final long translogGen) {
+        translogRefCounts.computeIfAbsent(translogGen, l -> Counter.newCounter(false)).addAndGet(1);
+        final AtomicBoolean closed = new AtomicBoolean();
+        assert assertAddTranslogRef(closed);
+        return () -> {
+            if (closed.compareAndSet(false, true)) {
+                releaseTranslogGen(translogGen);
+                assert assertRemoveTranslogRef(closed);
+            }
+        };
     }
 
-    /** returns the number of generations that were acquired for views */
-    synchronized int pendingViewsCount() {
+    private boolean assertAddTranslogRef(Object reference) {
+        final RuntimeException existing = openTranslogRef.put(reference, new RuntimeException());
+        if (existing != null) {
+            throw new AssertionError("double adding of closing reference", existing);
+        }
+        return true;
+    }
+
+    private boolean assertRemoveTranslogRef(Object reference) {
+        return openTranslogRef.remove(reference) != null;
+    }
+
+    /** returns the number of generations that were acquired for snapshots */
+    synchronized int pendingTranslogRefCount() {
         return translogRefCounts.size();
     }
 
     /**
-     * releases a generation that was acquired by {@link #acquireTranslogGenForView(long)}
+     * releases a generation that was acquired by {@link #acquireTranslogGen(long)}
      */
-    synchronized void releaseTranslogGenView(long translogGen) {
+    private synchronized void releaseTranslogGen(long translogGen) {
         Counter current = translogRefCounts.get(translogGen);
         if (current == null || current.get() <= 0) {
             throw new IllegalArgumentException("translog gen [" + translogGen + "] wasn't acquired");
@@ -99,7 +154,7 @@ public class TranslogDeletionPolicy {
      * @param writer  current translog writer
      */
     synchronized long minTranslogGenRequired(List<TranslogReader> readers, TranslogWriter writer) throws IOException {
-        long minByView = getMinTranslogGenRequiredByViews();
+        long minByLocks = getMinTranslogGenRequiredByLocks();
         long minByAge = getMinTranslogGenByAge(readers, writer, retentionAgeInMillis, currentTime());
         long minBySize = getMinTranslogGenBySize(readers, writer, retentionSizeInBytes);
         final long minByAgeAndSize;
@@ -109,7 +164,7 @@ public class TranslogDeletionPolicy {
         } else {
             minByAgeAndSize = Math.max(minByAge, minBySize);
         }
-        return Math.min(minByAgeAndSize, Math.min(minByView, minTranslogGenerationForRecovery));
+        return Math.min(minByAgeAndSize, Math.min(minByLocks, minTranslogGenerationForRecovery));
     }
 
     static long getMinTranslogGenBySize(List<TranslogReader> readers, TranslogWriter writer, long retentionSizeInBytes) {
@@ -145,7 +200,7 @@ public class TranslogDeletionPolicy {
         return System.currentTimeMillis();
     }
 
-    private long getMinTranslogGenRequiredByViews() {
+    private long getMinTranslogGenRequiredByLocks() {
         return translogRefCounts.keySet().stream().reduce(Math::min).orElse(Long.MAX_VALUE);
     }
 
@@ -154,8 +209,16 @@ public class TranslogDeletionPolicy {
         return minTranslogGenerationForRecovery;
     }
 
-    synchronized long getViewCount(long viewGen) {
-        final Counter counter = translogRefCounts.get(viewGen);
+    /**
+     * Returns a translog generation that will be used to calculate the number of uncommitted operations since the last index commit.
+     * See {@link Translog#uncommittedOperations()} and {@link Translog#uncommittedSizeInBytes()}
+     */
+    public synchronized long getTranslogGenerationOfLastCommit() {
+        return translogGenerationOfLastCommit;
+    }
+
+    synchronized long getTranslogRefCount(long gen) {
+        final Counter counter = translogRefCounts.get(gen);
         return counter == null ? 0 : counter.get();
     }
 }

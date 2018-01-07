@@ -48,6 +48,8 @@ import org.elasticsearch.search.aggregations.pipeline.movavg.MovAvgPipelineAggre
 import org.elasticsearch.search.aggregations.pipeline.movavg.models.MovAvgModel;
 import org.elasticsearch.search.fetch.FetchSubPhase;
 import org.elasticsearch.search.fetch.subphase.highlight.Highlighter;
+import org.elasticsearch.search.rescore.RescorerBuilder;
+import org.elasticsearch.search.rescore.Rescorer;
 import org.elasticsearch.search.suggest.Suggester;
 import org.elasticsearch.search.suggest.SuggestionBuilder;
 
@@ -55,7 +57,6 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.function.BiConsumer;
 
 import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
@@ -127,12 +128,9 @@ public interface SearchPlugin {
         return emptyList();
     }
     /**
-     * The new search response listeners in the form of {@link BiConsumer}s added by this plugin.
-     * The listeners are invoked on the coordinating node, at the very end of the search request.
-     * This provides a convenient location if you wish to inspect/modify the final response (took time, etc).
-     * The BiConsumers are passed the original {@link SearchRequest} and the final {@link SearchResponse}
+     * The next {@link Rescorer}s added by this plugin.
      */
-    default List<BiConsumer<SearchRequest, SearchResponse>> getSearchResponseListeners() {
+    default List<RescorerSpec<?>> getRescorers() {
         return emptyList();
     }
 
@@ -356,6 +354,17 @@ public interface SearchPlugin {
         }
 
         public SearchExtSpec(String name, Writeable.Reader<? extends T> reader, CheckedFunction<XContentParser, T, IOException> parser) {
+            super(name, reader, parser);
+        }
+    }
+
+    class RescorerSpec<T extends RescorerBuilder<T>> extends SearchExtensionSpec<T, CheckedFunction<XContentParser, T, IOException>> {
+        public RescorerSpec(ParseField name, Writeable.Reader<? extends T> reader,
+                CheckedFunction<XContentParser, T, IOException> parser) {
+            super(name, reader, parser);
+        }
+
+        public RescorerSpec(String name, Writeable.Reader<? extends T> reader, CheckedFunction<XContentParser, T, IOException> parser) {
             super(name, reader, parser);
         }
     }

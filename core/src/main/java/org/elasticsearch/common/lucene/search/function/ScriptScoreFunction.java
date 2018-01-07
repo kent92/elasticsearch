@@ -25,7 +25,6 @@ import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.Scorer;
 import org.elasticsearch.script.ExplainableSearchScript;
 import org.elasticsearch.script.Script;
-import org.elasticsearch.script.GeneralScriptException;
 import org.elasticsearch.script.SearchScript;
 
 import java.io.IOException;
@@ -52,11 +51,6 @@ public class ScriptScoreFunction extends ScoreFunction {
         }
 
         @Override
-        public int freq() throws IOException {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
         public DocIdSetIterator iterator() {
             throw new UnsupportedOperationException();
         }
@@ -80,14 +74,11 @@ public class ScriptScoreFunction extends ScoreFunction {
         leafScript.setScorer(scorer);
         return new LeafScoreFunction() {
             @Override
-            public double score(int docId, float subQueryScore) {
+            public double score(int docId, float subQueryScore) throws IOException {
                 leafScript.setDocument(docId);
                 scorer.docid = docId;
                 scorer.score = subQueryScore;
                 double result = leafScript.runAsDouble();
-                if (Double.isNaN(result)) {
-                    throw new GeneralScriptException("script_score returned NaN");
-                }
                 return result;
             }
 

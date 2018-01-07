@@ -20,16 +20,20 @@
 package org.elasticsearch.http;
 
 import org.elasticsearch.common.Booleans;
+import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.transport.PortsRange;
 import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.unit.TimeValue;
 
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 import static java.util.Collections.emptyList;
+import static org.elasticsearch.common.settings.Setting.boolSetting;
 import static org.elasticsearch.common.settings.Setting.listSetting;
 
 public final class HttpTransportSettings {
@@ -90,6 +94,21 @@ public final class HttpTransportSettings {
     // note, parsing cookies was fixed in netty 3.5.1 regarding stack allocation, but still, currently, we don't need cookies
     public static final Setting<Boolean> SETTING_HTTP_RESET_COOKIES =
         Setting.boolSetting("http.reset_cookies", false, Property.NodeScope);
+
+    // A default of 0 means that by default there is no read timeout
+    public static final Setting<TimeValue> SETTING_HTTP_READ_TIMEOUT =
+        Setting.timeSetting("http.read_timeout", new TimeValue(0), new TimeValue(0), Property.NodeScope);
+
+    public static final Setting<Boolean> SETTING_HTTP_TCP_NO_DELAY =
+        boolSetting("http.tcp_no_delay", NetworkService.TCP_NO_DELAY, Setting.Property.NodeScope);
+    public static final Setting<Boolean> SETTING_HTTP_TCP_KEEP_ALIVE =
+        boolSetting("http.tcp.keep_alive", NetworkService.TCP_KEEP_ALIVE, Setting.Property.NodeScope);
+    public static final Setting<Boolean> SETTING_HTTP_TCP_REUSE_ADDRESS =
+        boolSetting("http.tcp.reuse_address", NetworkService.TCP_REUSE_ADDRESS, Setting.Property.NodeScope);
+    public static final Setting<ByteSizeValue> SETTING_HTTP_TCP_SEND_BUFFER_SIZE =
+        Setting.byteSizeSetting("http.tcp.send_buffer_size", NetworkService.TCP_SEND_BUFFER_SIZE, Setting.Property.NodeScope);
+    public static final Setting<ByteSizeValue> SETTING_HTTP_TCP_RECEIVE_BUFFER_SIZE =
+        Setting.byteSizeSetting("http.tcp.receive_buffer_size", NetworkService.TCP_RECEIVE_BUFFER_SIZE, Setting.Property.NodeScope);
 
     private HttpTransportSettings() {
     }

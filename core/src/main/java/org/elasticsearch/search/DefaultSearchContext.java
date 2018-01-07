@@ -24,7 +24,6 @@ import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.Collector;
 import org.apache.lucene.search.FieldDoc;
 import org.apache.lucene.search.Query;
-import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.Counter;
 import org.elasticsearch.action.search.SearchTask;
 import org.elasticsearch.action.search.SearchType;
@@ -39,7 +38,7 @@ import org.elasticsearch.index.IndexService;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.cache.bitset.BitsetFilterCache;
 import org.elasticsearch.index.engine.Engine;
-import org.elasticsearch.index.fielddata.IndexFieldDataService;
+import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.ObjectMapper;
@@ -51,7 +50,6 @@ import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.index.search.NestedHelper;
 import org.elasticsearch.index.shard.IndexShard;
 import org.elasticsearch.index.similarity.SimilarityService;
-import org.elasticsearch.node.ResponseCollectorService;
 import org.elasticsearch.search.aggregations.SearchContextAggregations;
 import org.elasticsearch.search.collapse.CollapseContext;
 import org.elasticsearch.search.dfs.DfsSearchResult;
@@ -69,7 +67,7 @@ import org.elasticsearch.search.internal.ShardSearchRequest;
 import org.elasticsearch.search.profile.Profilers;
 import org.elasticsearch.search.query.QueryPhaseExecutionException;
 import org.elasticsearch.search.query.QuerySearchResult;
-import org.elasticsearch.search.rescore.RescoreSearchContext;
+import org.elasticsearch.search.rescore.RescoreContext;
 import org.elasticsearch.search.slice.SliceBuilder;
 import org.elasticsearch.search.sort.SortAndFormats;
 import org.elasticsearch.search.suggest.SuggestionSearchContext;
@@ -82,7 +80,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
 
 final class DefaultSearchContext extends SearchContext {
 
@@ -95,7 +92,6 @@ final class DefaultSearchContext extends SearchContext {
     private final BigArrays bigArrays;
     private final IndexShard indexShard;
     private final IndexService indexService;
-    private final ResponseCollectorService responseCollectorService;
     private final ContextIndexSearcher searcher;
     private final DfsSearchResult dfsResult;
     private final QuerySearchResult queryResult;
@@ -145,12 +141,11 @@ final class DefaultSearchContext extends SearchContext {
     private SearchContextAggregations aggregations;
     private SearchContextHighlight highlight;
     private SuggestionSearchContext suggest;
-    private List<RescoreSearchContext> rescore;
+    private List<RescoreContext> rescore;
     private volatile long keepAlive;
     private final long originNanoTime = System.nanoTime();
     private volatile long lastAccessTime = -1;
     private Profilers profilers;
-    private ExecutorService searchExecutor;
 
     private final Map<String, SearchExtBuilder> searchExtBuilders = new HashMap<>();
     private final Map<Class<?>, Collector> queryCollectors = new HashMap<>();
@@ -159,7 +154,7 @@ final class DefaultSearchContext extends SearchContext {
 
     DefaultSearchContext(long id, ShardSearchRequest request, SearchShardTarget shardTarget, Engine.Searcher engineSearcher,
                          IndexService indexService, IndexShard indexShard, BigArrays bigArrays, Counter timeEstimateCounter,
-                         TimeValue timeout, FetchPhase fetchPhase, ResponseCollectorService responseCollectorService) {
+                         TimeValue timeout, FetchPhase fetchPhase, String clusterAlias) {
         this.id = id;
         this.request = request;
         this.fetchPhase = fetchPhase;
@@ -173,11 +168,11 @@ final class DefaultSearchContext extends SearchContext {
         this.fetchResult = new FetchSearchResult(id, shardTarget);
         this.indexShard = indexShard;
         this.indexService = indexService;
-        this.responseCollectorService = responseCollectorService;
         this.searcher = new ContextIndexSearcher(engineSearcher, indexService.cache().query(), indexShard.getQueryCachingPolicy());
         this.timeEstimateCounter = timeEstimateCounter;
         this.timeout = timeout;
-        queryShardContext = indexService.newQueryShardContext(request.shardId().id(), searcher.getIndexReader(), request::nowInMillis);
+        queryShardContext = indexService.newQueryShardContext(request.shardId().id(), searcher.getIndexReader(), request::nowInMillis,
+            clusterAlias);
         queryShardContext.setTypes(request.types());
         queryBoost = request.indexBoost();
     }
@@ -203,26 +198,28 @@ final class DefaultSearchContext extends SearchContext {
 
         if (resultWindow > maxResultWindow) {
             if (scrollContext == null) {
-                throw new QueryPhaseExecutionException(this,
+                throw new IllegalArgumentException(
                         "Result window is too large, from + size must be less than or equal to: [" + maxResultWindow + "] but was ["
                                 + resultWindow + "]. See the scroll api for a more efficient way to request large data sets. "
                                 + "This limit can be set by changing the [" + IndexSettings.MAX_RESULT_WINDOW_SETTING.getKey()
                                 + "] index level setting.");
             }
-            throw new QueryPhaseExecutionException(this,
+            throw new IllegalArgumentException(
                     "Batch size is too large, size must be less than or equal to: [" + maxResultWindow + "] but was [" + resultWindow
                             + "]. Scroll batch sizes cost as much memory as result windows so they are controlled by the ["
                             + IndexSettings.MAX_RESULT_WINDOW_SETTING.getKey() + "] index level setting.");
         }
         if (rescore != null) {
+            if (sort != null) {
+                throw new IllegalArgumentException("Cannot use [sort] option in conjunction with [rescore].");
+            }
             int maxWindow = indexService.getIndexSettings().getMaxRescoreWindow();
-            for (RescoreSearchContext rescoreContext: rescore) {
-                if (rescoreContext.window() > maxWindow) {
-                    throw new QueryPhaseExecutionException(this, "Rescore window [" + rescoreContext.window() + "] is too large. It must "
-                            + "be less than [" + maxWindow + "]. This prevents allocating massive heaps for storing the results to be "
-                            + "rescored. This limit can be set by changing the [" + IndexSettings.MAX_RESCORE_WINDOW_SETTING.getKey()
+            for (RescoreContext rescoreContext: rescore) {
+                if (rescoreContext.getWindowSize() > maxWindow) {
+                    throw new IllegalArgumentException("Rescore window [" + rescoreContext.getWindowSize() + "] is too large. "
+                            + "It must be less than [" + maxWindow + "]. This prevents allocating massive heaps for storing the results "
+                            + "to be rescored. This limit can be set by changing the [" + IndexSettings.MAX_RESCORE_WINDOW_SETTING.getKey()
                             + "] index level setting.");
-
                 }
             }
         }
@@ -231,7 +228,7 @@ final class DefaultSearchContext extends SearchContext {
             int sliceLimit = indexService.getIndexSettings().getMaxSlicesPerScroll();
             int numSlices = sliceBuilder.getMax();
             if (numSlices > sliceLimit) {
-                throw new QueryPhaseExecutionException(this, "The number of slices [" + numSlices + "] is too large. It must "
+                throw new IllegalArgumentException("The number of slices [" + numSlices + "] is too large. It must "
                     + "be less than [" + sliceLimit + "]. This limit can be set by changing the [" +
                     IndexSettings.MAX_SLICES_PER_SCROLL.getKey() + "] index level setting.");
             }
@@ -273,7 +270,7 @@ final class DefaultSearchContext extends SearchContext {
                 && typeFilter == null // when a _type filter is set, it will automatically exclude nested docs
                 && new NestedHelper(mapperService()).mightMatchNestedDocs(query)
                 && (aliasFilter == null || new NestedHelper(mapperService()).mightMatchNestedDocs(aliasFilter))) {
-            filters.add(Queries.newNonNestedFilter());
+            filters.add(Queries.newNonNestedFilter(mapperService().getIndexSettings().getIndexVersionCreated()));
         }
 
         if (aliasFilter != null) {
@@ -403,7 +400,7 @@ final class DefaultSearchContext extends SearchContext {
     }
 
     @Override
-    public List<RescoreSearchContext> rescore() {
+    public List<RescoreContext> rescore() {
         if (rescore == null) {
             return Collections.emptyList();
         }
@@ -411,7 +408,7 @@ final class DefaultSearchContext extends SearchContext {
     }
 
     @Override
-    public void addRescore(RescoreSearchContext rescore) {
+    public void addRescore(RescoreContext rescore) {
         if (this.rescore == null) {
             this.rescore = new ArrayList<>();
         }
@@ -497,8 +494,8 @@ final class DefaultSearchContext extends SearchContext {
     }
 
     @Override
-    public IndexFieldDataService fieldData() {
-        return indexService.fieldData();
+    public <IFD extends IndexFieldData<?>> IFD getForField(MappedFieldType fieldType) {
+        return queryShardContext.getForField(fieldType);
     }
 
     @Override
